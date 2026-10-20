@@ -5,3 +5,5 @@ streamlit-folium
 numpy
 ortools
 streamlit-searchbox
+pandas
+openpyxl
