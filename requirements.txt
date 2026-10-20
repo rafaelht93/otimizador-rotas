@@ -1,1 +1,6 @@
 streamlit
+requests
+folium
+streamlit-folium
+numpy
+ortools
