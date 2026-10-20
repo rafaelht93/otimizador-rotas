@@ -1,4 +1,5 @@
 import hashlib
+import html
 import io
 import unicodedata
 from urllib.parse import urlencode
@@ -6,25 +7,24 @@ from urllib.parse import urlencode
 import folium
 import pandas as pd
 import streamlit as st
-
 from streamlit_folium import st_folium
 from streamlit_searchbox import st_searchbox
 
 from ors import (
+    ORSError,
     autocomplete_enderecos,
     obter_matriz_distancias,
     obter_rota_completa,
-    ORSError,
 )
 
 from route_engine import (
-    otimizar_rota,
     RouteOptimizationError,
+    otimizar_rota,
 )
 
 
 # ============================================================
-# CONFIGURAÇÃO DA PÁGINA
+# PÁGINA
 # ============================================================
 
 st.set_page_config(
@@ -33,16 +33,11 @@ st.set_page_config(
     layout="wide",
 )
 
-
-# ============================================================
-# CABEÇALHO
-# ============================================================
-
 st.title("🗺️ Otimizador de Rotas")
 
 st.write(
-    "Informe os locais manualmente ou importe uma lista por "
-    "CSV/Excel. O sistema calculará a melhor sequência da rota."
+    "Informe os locais manualmente ou importe uma lista por CSV/Excel. "
+    "O sistema calculará a melhor sequência da rota."
 )
 
 
@@ -80,7 +75,7 @@ if "erro_autocomplete" not in st.session_state:
 
 
 # ============================================================
-# CACHE AUTOCOMPLETE
+# CACHES
 # ============================================================
 
 @st.cache_data(
@@ -103,10 +98,6 @@ def buscar_sugestoes_cache(
     )
 
 
-# ============================================================
-# CACHE PARA ENDEREÇOS IMPORTADOS
-# ============================================================
-
 @st.cache_data(
     ttl=3600,
     show_spinner=False,
@@ -125,10 +116,6 @@ def buscar_endereco_importado_cache(
     )
 
 
-# ============================================================
-# CACHE MATRIX
-# ============================================================
-
 @st.cache_data(
     ttl=3600,
     show_spinner=False,
@@ -140,14 +127,12 @@ def obter_matrix_cache_v2(
 ):
 
     return obter_matriz_distancias(
-        coordenadas=list(coordenadas),
+        coordenadas=list(
+            coordenadas
+        ),
         api_key=_api_key,
     )
 
-
-# ============================================================
-# CACHE DIRECTIONS
-# ============================================================
 
 @st.cache_data(
     ttl=3600,
@@ -159,7 +144,9 @@ def obter_directions_cache(
 ):
 
     return obter_rota_completa(
-        coordenadas=list(coordenadas),
+        coordenadas=list(
+            coordenadas
+        ),
         api_key=_api_key,
     )
 
@@ -174,50 +161,75 @@ def buscar_sugestoes(
     focus_lon=None,
 ):
 
-    texto = (searchterm or "").strip()
+    texto = (
+        searchterm or ""
+    ).strip()
 
-    if len(texto) < 3:
+
+    if (
+        len(
+            texto
+        ) < 3
+        or
+        not ors_configurado
+    ):
+
         return []
 
-    if not ors_configurado:
-        return []
 
     try:
 
-        resultados = buscar_sugestoes_cache(
-            texto,
-            focus_lat,
-            focus_lon,
-            ORS_KEY,
+        resultados = (
+            buscar_sugestoes_cache(
+                texto,
+                focus_lat,
+                focus_lon,
+                ORS_KEY,
+            )
         )
 
-        st.session_state.erro_autocomplete = None
+
+        st.session_state.erro_autocomplete = (
+            None
+        )
+
 
     except ORSError as e:
 
-        st.session_state.erro_autocomplete = str(e)
+        st.session_state.erro_autocomplete = (
+            str(
+                e
+            )
+        )
 
         return []
+
 
     except Exception:
 
         st.session_state.erro_autocomplete = (
-            "Não foi possível pesquisar o local neste momento."
+            "Não foi possível pesquisar "
+            "o local neste momento."
         )
 
         return []
 
+
     return [
         (
-            resultado["label"],
+            resultado[
+                "label"
+            ],
             resultado,
         )
-        for resultado in resultados
+
+        for resultado
+        in resultados
     ]
 
 
 # ============================================================
-# CAMPO MANUAL
+# CAMPO DE BUSCA
 # ============================================================
 
 def campo_local(
@@ -229,12 +241,16 @@ def campo_local(
 
     if focus:
 
-        focus_lat = focus.get(
-            "latitude"
+        focus_lat = (
+            focus.get(
+                "latitude"
+            )
         )
 
-        focus_lon = focus.get(
-            "longitude"
+        focus_lon = (
+            focus.get(
+                "longitude"
+            )
         )
 
     else:
@@ -257,36 +273,32 @@ def campo_local(
 
 
 # ============================================================
-# NORMALIZA TEXTO
+# CSV / EXCEL
 # ============================================================
 
 def normalizar_texto(
     texto,
 ):
 
-    texto = str(
-        texto
-    ).strip().lower()
-
     texto = unicodedata.normalize(
         "NFKD",
-        texto,
+        str(
+            texto
+        ).strip().lower(),
     )
 
-    texto = "".join(
+
+    return "".join(
         caractere
-        for caractere in texto
+
+        for caractere
+        in texto
+
         if not unicodedata.combining(
             caractere
         )
     )
 
-    return texto
-
-
-# ============================================================
-# COLUNA ENDEREÇO
-# ============================================================
 
 def localizar_coluna_endereco(
     dataframe,
@@ -294,18 +306,18 @@ def localizar_coluna_endereco(
 
     for coluna in dataframe.columns:
 
-        if normalizar_texto(
-            coluna
-        ) == "endereco":
+        if (
+            normalizar_texto(
+                coluna
+            )
+            == "endereco"
+        ):
 
             return coluna
 
+
     return None
 
-
-# ============================================================
-# DECODIFICA CSV
-# ============================================================
 
 def decodificar_csv(
     bytes_arquivo,
@@ -324,61 +336,72 @@ def decodificar_csv(
         )
 
 
-# ============================================================
-# LIMPEZA CSV SIMPLES
-# ============================================================
-
 def limpar_linha_csv_simples(
     linha,
 ):
 
     valor = linha.strip()
 
+
     if (
-        len(valor) >= 2
+        len(
+            valor
+        ) >= 2
         and
         (
             (
-                valor.startswith('"')
+                valor.startswith(
+                    '"'
+                )
                 and
-                valor.endswith('"')
+                valor.endswith(
+                    '"'
+                )
             )
             or
             (
-                valor.startswith("'")
+                valor.startswith(
+                    "'"
+                )
                 and
-                valor.endswith("'")
+                valor.endswith(
+                    "'"
+                )
             )
         )
     ):
 
-        valor = valor[
-            1:-1
-        ]
-
-        valor = valor.replace(
-            '""',
-            '"',
+        valor = (
+            valor[
+                1:-1
+            ]
+            .replace(
+                '""',
+                '"',
+            )
         )
+
 
     return valor.strip()
 
-
-# ============================================================
-# LEITOR CSV ROBUSTO
-# ============================================================
 
 def ler_csv_robusto(
     bytes_arquivo,
 ):
 
-    texto = decodificar_csv(
-        bytes_arquivo
+    texto = (
+        decodificar_csv(
+            bytes_arquivo
+        )
     )
+
 
     linhas = [
         linha
-        for linha in texto.splitlines()
+
+        for linha
+        in texto.splitlines()
+
         if linha.strip()
     ]
 
@@ -390,37 +413,48 @@ def ler_csv_robusto(
         )
 
 
-    # ========================================================
-    # CSV DE UMA ÚNICA COLUNA
-    # ========================================================
-
-    cabecalho = normalizar_texto(
-        linhas[0]
-        .strip()
-        .strip('"')
-        .strip("'")
+    cabecalho = (
+        normalizar_texto(
+            linhas[
+                0
+            ]
+            .strip()
+            .strip(
+                '"'
+            )
+            .strip(
+                "'"
+            )
+        )
     )
 
 
+    # ========================================================
+    # CSV DE UMA COLUNA
+    # ========================================================
+
     if cabecalho == "endereco":
 
-        enderecos = []
-
-
-        for linha in linhas[
-            1:
-        ]:
-
-            endereco = limpar_linha_csv_simples(
+        enderecos = [
+            limpar_linha_csv_simples(
                 linha
             )
 
+            for linha
+            in linhas[
+                1:
+            ]
+        ]
 
-            if endereco:
 
-                enderecos.append(
-                    endereco
-                )
+        enderecos = [
+            endereco
+
+            for endereco
+            in enderecos
+
+            if endereco
+        ]
 
 
         return pd.DataFrame(
@@ -466,34 +500,37 @@ def ler_csv_robusto(
 
 
     raise ValueError(
-        "Não foi possível identificar a coluna "
-        "'endereco' no arquivo CSV."
+        "Não foi possível identificar "
+        "a coluna 'endereco' no arquivo CSV."
     )
 
-
-# ============================================================
-# LEITURA CSV / XLSX
-# ============================================================
 
 def ler_arquivo_paradas(
     arquivo,
 ):
 
-    bytes_arquivo = arquivo.getvalue()
+    bytes_arquivo = (
+        arquivo.getvalue()
+    )
 
-    nome_arquivo = arquivo.name.lower()
+
+    nome = (
+        arquivo.name.lower()
+    )
 
 
-    if nome_arquivo.endswith(
+    if nome.endswith(
         ".csv"
     ):
 
-        dataframe = ler_csv_robusto(
-            bytes_arquivo
+        dataframe = (
+            ler_csv_robusto(
+                bytes_arquivo
+            )
         )
 
 
-    elif nome_arquivo.endswith(
+    elif nome.endswith(
         ".xlsx"
     ):
 
@@ -520,16 +557,19 @@ def ler_arquivo_paradas(
         )
 
 
-    coluna_endereco = localizar_coluna_endereco(
-        dataframe
+    coluna = (
+        localizar_coluna_endereco(
+            dataframe
+        )
     )
 
 
-    if coluna_endereco is None:
+    if coluna is None:
 
         raise ValueError(
-            "O arquivo precisa possuir uma coluna "
-            "chamada 'endereco' ou 'endereço'."
+            "O arquivo precisa possuir "
+            "uma coluna chamada "
+            "'endereco' ou 'endereço'."
         )
 
 
@@ -537,7 +577,7 @@ def ler_arquivo_paradas(
 
 
     for valor in dataframe[
-        coluna_endereco
+        coluna
     ].tolist():
 
         if pd.isna(
@@ -547,28 +587,34 @@ def ler_arquivo_paradas(
             continue
 
 
-        endereco = str(
+        valor = str(
             valor
         ).strip()
 
 
-        if endereco:
+        if valor:
 
             enderecos.append(
-                endereco
+                valor
             )
 
 
     if not enderecos:
 
         raise ValueError(
-            "Nenhum endereço válido foi encontrado."
+            "Nenhum endereço válido "
+            "foi encontrado."
         )
 
 
-    hash_arquivo = hashlib.sha256(
-        bytes_arquivo
-    ).hexdigest()[:12]
+    hash_arquivo = (
+        hashlib.sha256(
+            bytes_arquivo
+        )
+        .hexdigest()[
+            :12
+        ]
+    )
 
 
     return (
@@ -578,7 +624,7 @@ def ler_arquivo_paradas(
 
 
 # ============================================================
-# CONVERSÃO DE LOCAL
+# LOCAL
 # ============================================================
 
 def converter_local(
@@ -587,6 +633,7 @@ def converter_local(
 ):
 
     return {
+
         "nome":
             origem.get(
                 "label",
@@ -651,13 +698,23 @@ def criar_mapa(
     geometry,
     locais_ordenados,
     rota_fechada,
+    distancia_km,
+    tempo_texto,
+    objetivo,
 ):
+
+    # ORS:
+    # longitude, latitude
+    #
+    # Folium:
+    # latitude, longitude
 
     path = [
         (
             lat,
             lon,
         )
+
         for lon, lat
         in geometry
     ]
@@ -671,15 +728,30 @@ def criar_mapa(
 
 
     centro = [
-        sum(
-            ponto[0]
-            for ponto in path
-        ) / len(path),
 
         sum(
-            ponto[1]
-            for ponto in path
-        ) / len(path),
+            ponto[
+                0
+            ]
+
+            for ponto
+            in path
+        )
+        / len(
+            path
+        ),
+
+        sum(
+            ponto[
+                1
+            ]
+
+            for ponto
+            in path
+        )
+        / len(
+            path
+        ),
     ]
 
 
@@ -694,6 +766,7 @@ def criar_mapa(
         path,
         weight=5,
         opacity=0.8,
+        tooltip="Rota otimizada",
     ).add_to(
         mapa
     )
@@ -702,7 +775,9 @@ def criar_mapa(
     if rota_fechada:
 
         locais_marcadores = (
-            locais_ordenados[:-1]
+            locais_ordenados[
+                :-1
+            ]
         )
 
     else:
@@ -712,12 +787,27 @@ def criar_mapa(
         )
 
 
+    # ========================================================
+    # MARCADORES
+    # ========================================================
+
     for numero, local in enumerate(
         locais_marcadores,
         start=1,
     ):
 
-        html = f"""
+        nome = (
+            html.escape(
+                str(
+                    local[
+                        "nome"
+                    ]
+                )
+            )
+        )
+
+
+        marcador_html = f"""
         <div style="
             background:#1e3a8a;
             color:white;
@@ -738,6 +828,7 @@ def criar_mapa(
 
 
         folium.Marker(
+
             location=[
                 local[
                     "latitude"
@@ -746,16 +837,21 @@ def criar_mapa(
                     "longitude"
                 ],
             ],
+
             tooltip=(
                 f"{numero}. "
-                f"{local['nome']}"
+                f"{nome}"
             ),
-            popup=local[
-                "nome"
-            ],
+
+            popup=folium.Popup(
+                nome,
+                max_width=350,
+            ),
+
             icon=folium.DivIcon(
-                html=html
+                html=marcador_html
             ),
+
         ).add_to(
             mapa
         )
@@ -765,29 +861,110 @@ def criar_mapa(
         [
             [
                 min(
-                    ponto[0]
-                    for ponto in path
+                    ponto[
+                        0
+                    ]
+
+                    for ponto
+                    in path
                 ),
+
                 min(
-                    ponto[1]
-                    for ponto in path
+                    ponto[
+                        1
+                    ]
+
+                    for ponto
+                    in path
                 ),
             ],
             [
                 max(
-                    ponto[0]
-                    for ponto in path
+                    ponto[
+                        0
+                    ]
+
+                    for ponto
+                    in path
                 ),
+
                 max(
-                    ponto[1]
-                    for ponto in path
+                    ponto[
+                        1
+                    ]
+
+                    for ponto
+                    in path
                 ),
             ],
         ]
     )
 
 
+    # ========================================================
+    # PAINEL DO MAPA
+    # ========================================================
+
+    objetivo_texto = (
+        "Distância"
+
+        if objetivo
+        == "Menor distância"
+
+        else "Tempo"
+    )
+
+
+    painel = f"""
+    <div style="
+        position:fixed;
+        top:10px;
+        right:10px;
+        z-index:9999;
+        background:rgba(255,255,255,.95);
+        padding:12px 14px;
+        border-radius:8px;
+        border:1px solid #ccc;
+        box-shadow:0 2px 8px rgba(0,0,0,.18);
+        font-family:Arial,sans-serif;
+        font-size:13px;
+        max-width:280px;
+    ">
+        <strong>Rota otimizada</strong><br>
+        Distância: {distancia_km:.2f} km<br>
+        Tempo estimado: {html.escape(str(tempo_texto))}<br>
+        Otimizado por: {objetivo_texto}<br>
+        Locais: {len(locais_marcadores)}
+    </div>
+    """
+
+
+    mapa.get_root().html.add_child(
+        folium.Element(
+            painel
+        )
+    )
+
+
     return mapa
+
+
+# ============================================================
+# EXPORTA MAPA HTML
+# ============================================================
+
+def gerar_html_mapa(
+    mapa,
+):
+
+    return (
+        mapa
+        .get_root()
+        .render()
+        .encode(
+            "utf-8"
+        )
+    )
 
 
 # ============================================================
@@ -798,27 +975,39 @@ def montar_referencia_google(
     local,
 ):
 
+    componentes = []
+
+
     nome = (
-        local.get("name")
+        local.get(
+            "name"
+        )
         or
-        local.get("nome")
+        local.get(
+            "nome"
+        )
     )
+
 
     street = local.get(
         "street"
     )
 
+
     housenumber = local.get(
         "housenumber"
     )
+
 
     locality = local.get(
         "locality"
     )
 
+
     region = local.get(
         "region"
     )
+
 
     country = (
         local.get(
@@ -829,13 +1018,12 @@ def montar_referencia_google(
     )
 
 
-    componentes = []
-
-
     if nome:
 
         componentes.append(
-            str(nome).strip()
+            str(
+                nome
+            ).strip()
         )
 
 
@@ -860,67 +1048,37 @@ def montar_referencia_google(
             )
 
 
-    if locality:
+    for item in (
+        locality,
+        region,
+        country,
+    ):
 
-        locality = str(
-            locality
-        ).strip()
+        if item:
 
-
-        if locality not in componentes:
-
-            componentes.append(
-                locality
-            )
-
-
-    if region:
-
-        region = str(
-            region
-        ).strip()
+            item = str(
+                item
+            ).strip()
 
 
-        if region not in componentes:
+            if item not in componentes:
 
-            componentes.append(
-                region
-            )
-
-
-    if country:
-
-        country = str(
-            country
-        ).strip()
+                componentes.append(
+                    item
+                )
 
 
-        if country not in componentes:
-
-            componentes.append(
-                country
-            )
-
-
-    referencia = ", ".join(
-        componentes
-    )
-
-
-    if not referencia:
-
-        referencia = local.get(
+    return (
+        ", ".join(
+            componentes
+        )
+        or
+        local.get(
             "nome",
             ""
         )
+    )
 
-
-    return referencia
-
-
-# ============================================================
-# GOOGLE COORDENADA
-# ============================================================
 
 def coordenada_google_maps(
     local,
@@ -931,10 +1089,6 @@ def coordenada_google_maps(
         f"{local['longitude']:.7f}"
     )
 
-
-# ============================================================
-# GOOGLE URL
-# ============================================================
 
 def gerar_url_google_maps(
     locais_trecho,
@@ -954,9 +1108,11 @@ def gerar_url_google_maps(
             coordenada_google_maps(
                 local
             )
+
             for local
             in locais_trecho
         ]
+
 
     else:
 
@@ -964,22 +1120,32 @@ def gerar_url_google_maps(
             montar_referencia_google(
                 local
             )
+
             for local
             in locais_trecho
         ]
 
 
-    origem = referencias[0]
-
-    destino = referencias[-1]
-
-
     params = {
-        "api": "1",
-        "origin": origem,
-        "destination": destino,
-        "travelmode": "driving",
-        "dir_action": "navigate",
+
+        "api":
+            "1",
+
+        "origin":
+            referencias[
+                0
+            ],
+
+        "destination":
+            referencias[
+                -1
+            ],
+
+        "travelmode":
+            "driving",
+
+        "dir_action":
+            "navigate",
     }
 
 
@@ -1003,10 +1169,6 @@ def gerar_url_google_maps(
         )
     )
 
-
-# ============================================================
-# DIVISÃO GOOGLE
-# ============================================================
 
 def dividir_rota_google_maps(
     locais_ordenados,
@@ -1047,17 +1209,13 @@ def dividir_rota_google_maps(
         )
 
 
-        trecho = (
+        trechos.append(
             locais_ordenados[
                 inicio:
                 fim + 1
             ]
         )
 
-
-        trechos.append(
-            trecho
-        )
 
         inicio = fim
 
@@ -1066,7 +1224,188 @@ def dividir_rota_google_maps(
 
 
 # ============================================================
-# MODO DE ENTRADA
+# EXPORTAÇÃO CSV / EXCEL
+# ============================================================
+
+def dataframe_rota_otimizada(
+    locais_ordenados,
+    rota_fechada,
+):
+
+    linhas = []
+
+    total = len(
+        locais_ordenados
+    )
+
+
+    for ordem, local in enumerate(
+        locais_ordenados,
+        start=1,
+    ):
+
+        if ordem == 1:
+
+            tipo = "Início"
+
+
+        elif (
+            rota_fechada
+            and
+            ordem == total
+        ):
+
+            tipo = "Retorno"
+
+
+        elif (
+            not rota_fechada
+            and
+            ordem == total
+        ):
+
+            tipo = "Fim"
+
+
+        else:
+
+            tipo = "Parada"
+
+
+        linhas.append(
+            {
+
+                "ordem":
+                    ordem,
+
+                "tipo":
+                    tipo,
+
+                "local":
+                    local[
+                        "nome"
+                    ],
+
+                "latitude":
+                    local[
+                        "latitude"
+                    ],
+
+                "longitude":
+                    local[
+                        "longitude"
+                    ],
+            }
+        )
+
+
+    return pd.DataFrame(
+        linhas
+    )
+
+
+def gerar_csv_rota(
+    dataframe,
+):
+
+    return (
+        dataframe
+        .to_csv(
+            index=False,
+            sep=";",
+            encoding="utf-8-sig",
+        )
+        .encode(
+            "utf-8-sig"
+        )
+    )
+
+
+def gerar_excel_rota(
+    dataframe,
+    distancia_km,
+    tempo_texto,
+    objetivo,
+    modo,
+    voltar_inicio,
+):
+
+    buffer = io.BytesIO()
+
+
+    resumo = pd.DataFrame(
+        [
+            {
+
+                "Distância total (km)":
+                    round(
+                        distancia_km,
+                        2,
+                    ),
+
+                "Tempo estimado":
+                    tempo_texto,
+
+                "Otimizado por":
+                    (
+                        "Distância"
+
+                        if objetivo
+                        == "Menor distância"
+
+                        else "Tempo"
+                    ),
+
+                "Modo":
+                    modo,
+
+                "Tipo de rota":
+                    (
+                        "Fechada"
+
+                        if voltar_inicio
+
+                        else "Aberta"
+                    ),
+
+                "Quantidade de pontos na sequência":
+                    len(
+                        dataframe
+                    ),
+            }
+        ]
+    )
+
+
+    with pd.ExcelWriter(
+        buffer,
+        engine="openpyxl",
+    ) as writer:
+
+        resumo.to_excel(
+            writer,
+            sheet_name="Resumo",
+            index=False,
+        )
+
+
+        dataframe.to_excel(
+            writer,
+            sheet_name="Rota otimizada",
+            index=False,
+        )
+
+
+    buffer.seek(
+        0
+    )
+
+
+    return buffer.getvalue()
+
+
+# ============================================================
+# ENTRADA DOS LOCAIS
 # ============================================================
 
 st.subheader(
@@ -1075,11 +1414,14 @@ st.subheader(
 
 
 modo_entrada = st.radio(
+
     "Como deseja informar os locais?",
+
     [
         "Digitar manualmente",
         "Importar CSV/Excel",
     ],
+
     horizontal=True,
 )
 
@@ -1104,18 +1446,21 @@ if modo_entrada == "Digitar manualmente":
 
 
     col_inicio, col_fim = (
-        st.columns(2)
+        st.columns(
+            2
+        )
     )
 
 
     with col_inicio:
 
         ponto_inicio = campo_local(
-            chave="busca_ponto_inicio",
-            label="📍 Ponto inicial",
-            placeholder=(
-                "Digite pelo menos 3 letras..."
-            ),
+
+            "busca_ponto_inicio",
+
+            "📍 Ponto inicial",
+
+            "Digite pelo menos 3 letras...",
         )
 
 
@@ -1123,28 +1468,24 @@ if modo_entrada == "Digitar manualmente":
 
         if voltar_inicio:
 
-            if ponto_inicio:
+            st.text_input(
 
-                st.text_input(
-                    "🏁 Ponto final",
-                    value=(
-                        ponto_inicio[
-                            "label"
-                        ]
-                    ),
-                    disabled=True,
-                )
+                "🏁 Ponto final",
 
-            else:
+                value=(
+                    ponto_inicio[
+                        "label"
+                    ]
 
-                st.text_input(
-                    "🏁 Ponto final",
-                    value=(
-                        "Selecione primeiro "
-                        "o ponto inicial"
-                    ),
-                    disabled=True,
-                )
+                    if ponto_inicio
+
+                    else
+                    "Selecione primeiro "
+                    "o ponto inicial"
+                ),
+
+                disabled=True,
+            )
 
 
             ponto_fim = (
@@ -1155,11 +1496,13 @@ if modo_entrada == "Digitar manualmente":
         else:
 
             ponto_fim = campo_local(
-                chave="busca_ponto_fim",
-                label="🏁 Ponto final",
-                placeholder=(
-                    "Digite pelo menos 3 letras..."
-                ),
+
+                "busca_ponto_fim",
+
+                "🏁 Ponto final",
+
+                "Digite pelo menos 3 letras...",
+
                 focus=ponto_inicio,
             )
 
@@ -1172,10 +1515,6 @@ if modo_entrada == "Digitar manualmente":
             f"**{ponto_inicio['label']}**."
         )
 
-
-    # ========================================================
-    # PARADAS MANUAIS
-    # ========================================================
 
     st.subheader(
         "Paradas intermediárias"
@@ -1208,11 +1547,14 @@ if modo_entrada == "Digitar manualmente":
     with col_remover:
 
         if st.button(
+
             "➖ Remover parada",
+
             disabled=(
                 st.session_state.num_paradas
                 <= 1
             ),
+
             use_container_width=True,
         ):
 
@@ -1225,19 +1567,19 @@ if modo_entrada == "Digitar manualmente":
         st.session_state.num_paradas
     ):
 
-        parada = campo_local(
-            chave=f"busca_parada_{i}",
-            label=f"Parada {i + 1}",
-            placeholder=(
-                "Digite um endereço "
-                "ou estabelecimento..."
-            ),
-            focus=ponto_inicio,
-        )
-
-
         paradas.append(
-            parada
+
+            campo_local(
+
+                f"busca_parada_{i}",
+
+                f"Parada {i + 1}",
+
+                "Digite um endereço "
+                "ou estabelecimento...",
+
+                focus=ponto_inicio,
+            )
         )
 
 
@@ -1250,7 +1592,7 @@ else:
     st.info(
         "O sistema localizará automaticamente cada endereço "
         "e utilizará o primeiro resultado encontrado. "
-        "Você poderá alterar apenas os que estiverem incorretos."
+        "Se necessário, você poderá trocar algum resultado."
     )
 
 
@@ -1267,9 +1609,7 @@ else:
         data=modelo_csv.encode(
             "utf-8-sig"
         ),
-        file_name=(
-            "modelo_paradas.csv"
-        ),
+        file_name="modelo_paradas.csv",
         mime="text/csv",
     )
 
@@ -1298,7 +1638,9 @@ else:
         except Exception as e:
 
             st.error(
-                str(e)
+                str(
+                    e
+                )
             )
 
             st.stop()
@@ -1309,7 +1651,8 @@ else:
         ) > 50:
 
             st.error(
-                "O arquivo possui mais de 50 locais."
+                "O arquivo possui mais "
+                "de 50 locais."
             )
 
             st.stop()
@@ -1354,16 +1697,15 @@ else:
                 )
 
 
-        # ====================================================
-        # ENDEREÇOS NÃO ENCONTRADOS
-        # ====================================================
-
         nao_encontrados = [
+
             indice + 1
+
             for indice, candidatos
             in enumerate(
                 resultados_por_endereco
             )
+
             if not candidatos
         ]
 
@@ -1371,19 +1713,20 @@ else:
         if nao_encontrados:
 
             st.error(
-                "Não foi possível localizar automaticamente "
-                "os seguintes itens: "
+
+                "Não foi possível localizar "
+                "automaticamente os itens: "
+
                 + ", ".join(
-                    str(numero)
-                    for numero in nao_encontrados
+                    map(
+                        str,
+                        nao_encontrados,
+                    )
                 )
+
                 + "."
             )
 
-
-        # ====================================================
-        # REVISÃO
-        # ====================================================
 
         st.subheader(
             "🔎 Endereços identificados"
@@ -1392,7 +1735,7 @@ else:
 
         st.caption(
             "O primeiro resultado encontrado já está selecionado. "
-            "Só altere algum item se perceber que o local está errado."
+            "Só altere um item se o local estiver incorreto."
         )
 
 
@@ -1403,47 +1746,57 @@ else:
             endereco_original,
             candidatos,
         ) in enumerate(
+
             zip(
                 enderecos_importados,
                 resultados_por_endereco,
             ),
+
             start=1,
         ):
 
             if not candidatos:
 
                 st.error(
-                    f"{indice}. {endereco_original} — "
+                    f"{indice}. "
+                    f"{endereco_original} — "
                     "nenhum resultado encontrado."
                 )
+
 
                 locais_confirmados.append(
                     None
                 )
 
+
                 continue
 
 
-            # =================================================
-            # PRIMEIRO RESULTADO É O PADRÃO
-            # =================================================
+            posicao = st.selectbox(
 
-            indice_escolhido = st.selectbox(
-                f"{indice}. {endereco_original}",
+                f"{indice}. "
+                f"{endereco_original}",
+
                 options=list(
                     range(
-                        len(candidatos)
+                        len(
+                            candidatos
+                        )
                     )
                 ),
+
                 index=0,
+
                 key=(
                     f"import_result_"
                     f"{hash_arquivo}_"
                     f"{indice}"
                 ),
+
                 format_func=(
                     lambda posicao,
                     lista=candidatos:
+
                     lista[
                         posicao
                     ][
@@ -1453,42 +1806,39 @@ else:
             )
 
 
-            local_escolhido = candidatos[
-                indice_escolhido
-            ]
-
-
             locais_confirmados.append(
-                local_escolhido
+                candidatos[
+                    posicao
+                ]
             )
 
 
         # ====================================================
-        # PODE CONTINUAR?
+        # INÍCIO / FIM
         # ====================================================
 
         if all(
             local is not None
-            for local in locais_confirmados
+
+            for local
+            in locais_confirmados
         ):
 
             importacao_pronta = True
 
 
             st.success(
-                "Todos os endereços foram identificados."
+                "Todos os endereços "
+                "foram identificados."
             )
 
 
             st.divider()
 
 
-            # =================================================
-            # INÍCIO / FIM
-            # =================================================
-
             st.subheader(
-                "🚩 Defina o início e o fim da rota"
+                "🚩 Defina o início "
+                "e o fim da rota"
             )
 
 
@@ -1502,18 +1852,21 @@ else:
 
 
             indice_inicio = st.selectbox(
+
                 "Ponto inicial",
+
                 options=indices,
+
                 key=(
                     f"inicio_"
                     f"{hash_arquivo}"
                 ),
+
                 format_func=(
                     lambda indice:
-                    (
-                        f"{indice + 1}. "
-                        f"{locais_confirmados[indice]['label']}"
-                    )
+
+                    f"{indice + 1}. "
+                    f"{locais_confirmados[indice]['label']}"
                 ),
             )
 
@@ -1526,17 +1879,15 @@ else:
 
 
             voltar_inicio = st.checkbox(
+
                 "🔄 Retornar ao ponto inicial",
+
                 key=(
                     f"voltar_"
                     f"{hash_arquivo}"
                 ),
             )
 
-
-            # =================================================
-            # FINAL
-            # =================================================
 
             if voltar_inicio:
 
@@ -1545,39 +1896,45 @@ else:
                 )
 
 
+                indice_fim = None
+
+
                 st.info(
                     "A rota terminará novamente em "
                     f"**{ponto_inicio['label']}**."
                 )
 
 
-                indice_fim = None
-
-
             else:
 
                 opcoes_fim = [
+
                     indice
+
                     for indice
                     in indices
+
                     if indice
                     != indice_inicio
                 ]
 
 
                 indice_fim = st.selectbox(
+
                     "Ponto final",
+
                     options=opcoes_fim,
+
                     key=(
                         f"fim_"
                         f"{hash_arquivo}"
                     ),
+
                     format_func=(
                         lambda indice:
-                        (
-                            f"{indice + 1}. "
-                            f"{locais_confirmados[indice]['label']}"
-                        )
+
+                        f"{indice + 1}. "
+                        f"{locais_confirmados[indice]['label']}"
                     ),
                 )
 
@@ -1589,10 +1946,6 @@ else:
                 )
 
 
-            # =================================================
-            # RESTANTE = PARADAS
-            # =================================================
-
             excluir = {
                 indice_inicio
             }
@@ -1601,7 +1954,8 @@ else:
             if (
                 not voltar_inicio
                 and
-                indice_fim is not None
+                indice_fim
+                is not None
             ):
 
                 excluir.add(
@@ -1610,11 +1964,14 @@ else:
 
 
             paradas = [
+
                 local
+
                 for indice, local
                 in enumerate(
                     locais_confirmados
                 )
+
                 if indice
                 not in excluir
             ]
@@ -1629,12 +1986,13 @@ else:
     else:
 
         st.caption(
-            "Selecione um arquivo para continuar."
+            "Selecione um arquivo "
+            "para continuar."
         )
 
 
 # ============================================================
-# ERROS AUTOCOMPLETE
+# ERRO AUTOCOMPLETE
 # ============================================================
 
 if st.session_state.erro_autocomplete:
@@ -1657,18 +2015,23 @@ st.subheader(
 
 
 col_objetivo, col_modo = (
-    st.columns(2)
+    st.columns(
+        2
+    )
 )
 
 
 with col_objetivo:
 
     objetivo = st.radio(
+
         "Otimizar por",
+
         [
             "Menor distância",
             "Menor tempo",
         ],
+
         horizontal=True,
     )
 
@@ -1676,11 +2039,14 @@ with col_objetivo:
 with col_modo:
 
     modo = st.radio(
+
         "Modo de otimização",
+
         [
             "Rápido",
             "Preciso",
         ],
+
         horizontal=True,
     )
 
@@ -1692,6 +2058,7 @@ if objetivo == "Menor distância":
         "a distância total percorrida."
     )
 
+
 else:
 
     st.info(
@@ -1700,18 +2067,19 @@ else:
     )
 
 
-if modo == "Preciso":
+st.caption(
 
-    st.caption(
+    (
         "🎯 O modo Preciso executa várias estratégias "
         "e tenta melhorar ou comprovar a solução."
     )
 
-else:
+    if modo == "Preciso"
 
-    st.caption(
-        "⚡ O modo Rápido prioriza velocidade."
-    )
+    else
+
+    "⚡ O modo Rápido prioriza velocidade."
+)
 
 
 # ============================================================
@@ -1729,10 +2097,14 @@ calcular = st.button(
 
 
 # ============================================================
-# EXECUÇÃO
+# RESULTADO
 # ============================================================
 
 if calcular:
+
+    # ========================================================
+    # VALIDAÇÕES
+    # ========================================================
 
     if not ors_configurado:
 
@@ -1781,9 +2153,12 @@ if calcular:
 
 
     paradas_validas = [
+
         parada
+
         for parada
         in paradas
+
         if parada is not None
     ]
 
@@ -1803,7 +2178,7 @@ if calcular:
 
 
     # ========================================================
-    # MONTA LISTA DO SOLVER
+    # LOCAIS
     # ========================================================
 
     locais = [
@@ -1820,6 +2195,7 @@ if calcular:
     ):
 
         locais.append(
+
             converter_local(
                 parada,
                 f"Parada {numero}",
@@ -1830,6 +2206,7 @@ if calcular:
     if not voltar_inicio:
 
         locais.append(
+
             converter_local(
                 ponto_fim,
                 "Fim",
@@ -1847,12 +2224,14 @@ if calcular:
     for local in locais:
 
         chave = (
+
             round(
                 local[
                     "latitude"
                 ],
                 6,
             ),
+
             round(
                 local[
                     "longitude"
@@ -1893,8 +2272,13 @@ if calcular:
 
 
     if (
-        len(locais)
-        * len(locais)
+        len(
+            locais
+        )
+        *
+        len(
+            locais
+        )
         > 3500
     ):
 
@@ -1906,15 +2290,22 @@ if calcular:
         st.stop()
 
 
+    # ========================================================
+    # COORDENADAS
+    # ========================================================
+
     coordenadas = tuple(
+
         (
             local[
                 "latitude"
             ],
+
             local[
                 "longitude"
             ],
         )
+
         for local
         in locais
     )
@@ -1923,15 +2314,18 @@ if calcular:
     start_idx = 0
 
 
-    if voltar_inicio:
+    end_idx = (
 
-        end_idx = 0
+        0
 
-    else:
+        if voltar_inicio
 
-        end_idx = (
-            len(locais) - 1
-        )
+        else
+
+        len(
+            locais
+        ) - 1
+    )
 
 
     # ========================================================
@@ -1981,21 +2375,21 @@ if calcular:
             st.stop()
 
 
-        if objetivo == "Menor distância":
+        matrix_otimizacao = (
 
-            matrix_otimizacao = (
-                matrix_data[
-                    "distancias"
-                ]
-            )
+            matrix_data[
+                "distancias"
+            ]
 
-        else:
+            if objetivo
+            == "Menor distância"
 
-            matrix_otimizacao = (
-                matrix_data[
-                    "duracoes"
-                ]
-            )
+            else
+
+            matrix_data[
+                "duracoes"
+            ]
+        )
 
 
         with st.spinner(
@@ -2010,27 +2404,31 @@ if calcular:
             )
 
 
-        route = resultado[
-            "route"
-        ]
-
-
         locais_ordenados = [
-            locais[indice]
+
+            locais[
+                indice
+            ]
+
             for indice
-            in route
+            in resultado[
+                "route"
+            ]
         ]
 
 
         coordenadas_ordenadas = tuple(
+
             (
                 local[
                     "latitude"
                 ],
+
                 local[
                     "longitude"
                 ],
             )
+
             for local
             in locais_ordenados
         )
@@ -2054,7 +2452,9 @@ if calcular:
     ) as e:
 
         st.error(
-            str(e)
+            str(
+                e
+            )
         )
 
         st.stop()
@@ -2075,7 +2475,7 @@ if calcular:
 
 
     # ========================================================
-    # RESULTADOS
+    # MÉTRICAS
     # ========================================================
 
     distancia_km = (
@@ -2094,30 +2494,23 @@ if calcular:
     )
 
 
-    horas = (
-        minutos_total
-        // 60
+    horas, minutos = divmod(
+        minutos_total,
+        60,
     )
 
 
-    minutos = (
-        minutos_total
-        % 60
+    tempo_texto = (
+
+        f"{horas}h "
+        f"{minutos:02d}min"
+
+        if horas
+
+        else
+
+        f"{minutos} min"
     )
-
-
-    if horas:
-
-        tempo_texto = (
-            f"{horas}h "
-            f"{minutos:02d}min"
-        )
-
-    else:
-
-        tempo_texto = (
-            f"{minutos} min"
-        )
 
 
     st.success(
@@ -2126,7 +2519,9 @@ if calcular:
 
 
     col1, col2, col3, col4 = (
-        st.columns(4)
+        st.columns(
+            4
+        )
     )
 
 
@@ -2150,25 +2545,32 @@ if calcular:
 
         st.metric(
             "Locais",
-            len(locais),
+            len(
+                locais
+            ),
         )
 
 
     with col4:
 
         st.metric(
+
             "Otimizado por",
+
             (
                 "Distância"
+
                 if objetivo
                 == "Menor distância"
+
                 else "Tempo"
             ),
         )
 
 
     st.caption(
-        f"Modo utilizado: **{modo}**"
+        f"Modo utilizado: "
+        f"**{modo}**"
     )
 
 
@@ -2184,7 +2586,8 @@ if calcular:
     ):
 
         st.success(
-            "🏆 Rota ótima matematicamente comprovada."
+            "🏆 Rota ótima "
+            "matematicamente comprovada."
         )
 
 
@@ -2205,7 +2608,8 @@ if calcular:
     else:
 
         st.info(
-            "⚡ Rota otimizada em modo rápido."
+            "⚡ Rota otimizada "
+            "em modo rápido."
         )
 
 
@@ -2218,17 +2622,18 @@ if calcular:
     )
 
 
-    if voltar_inicio:
+    lista_exibir = (
 
-        lista_exibir = (
-            locais_ordenados[:-1]
-        )
+        locais_ordenados[
+            :-1
+        ]
 
-    else:
+        if voltar_inicio
 
-        lista_exibir = (
-            locais_ordenados
-        )
+        else
+
+        locais_ordenados
+    )
 
 
     for numero, local in enumerate(
@@ -2252,6 +2657,171 @@ if calcular:
 
 
     # ========================================================
+    # CRIA MAPA UMA ÚNICA VEZ
+    # ========================================================
+
+    mapa = criar_mapa(
+
+        geometry=(
+            rota_real[
+                "geometry"
+            ]
+        ),
+
+        locais_ordenados=(
+            locais_ordenados
+        ),
+
+        rota_fechada=(
+            voltar_inicio
+        ),
+
+        distancia_km=(
+            distancia_km
+        ),
+
+        tempo_texto=(
+            tempo_texto
+        ),
+
+        objetivo=(
+            objetivo
+        ),
+    )
+
+
+    # ========================================================
+    # EXPORTAÇÃO
+    # ========================================================
+
+    st.subheader(
+        "💾 Exportar rota"
+    )
+
+
+    dataframe_exportacao = (
+        dataframe_rota_otimizada(
+            locais_ordenados,
+            voltar_inicio,
+        )
+    )
+
+
+    csv_exportacao = (
+        gerar_csv_rota(
+            dataframe_exportacao
+        )
+    )
+
+
+    excel_exportacao = (
+        gerar_excel_rota(
+
+            dataframe_exportacao,
+
+            distancia_km,
+
+            tempo_texto,
+
+            objetivo,
+
+            modo,
+
+            voltar_inicio,
+        )
+    )
+
+
+    html_mapa = (
+        gerar_html_mapa(
+            mapa
+        )
+    )
+
+
+    col_csv, col_excel, col_mapa = (
+        st.columns(
+            3
+        )
+    )
+
+
+    with col_csv:
+
+        st.download_button(
+
+            "⬇️ Baixar rota em CSV",
+
+            data=(
+                csv_exportacao
+            ),
+
+            file_name=(
+                "rota_otimizada.csv"
+            ),
+
+            mime=(
+                "text/csv"
+            ),
+
+            use_container_width=True,
+        )
+
+
+    with col_excel:
+
+        st.download_button(
+
+            "⬇️ Baixar relatório em Excel",
+
+            data=(
+                excel_exportacao
+            ),
+
+            file_name=(
+                "rota_otimizada.xlsx"
+            ),
+
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+
+            use_container_width=True,
+        )
+
+
+    with col_mapa:
+
+        st.download_button(
+
+            "🗺️ Baixar mapa interativo",
+
+            data=(
+                html_mapa
+            ),
+
+            file_name=(
+                "mapa_rota_otimizada.html"
+            ),
+
+            mime=(
+                "text/html"
+            ),
+
+            use_container_width=True,
+        )
+
+
+    st.caption(
+        "O mapa é exportado em HTML interativo e mantém "
+        "a rota, os marcadores numerados, zoom e o resumo "
+        "da viagem. Para carregar o mapa-base, o navegador "
+        "precisa de internet."
+    )
+
+
+    # ========================================================
     # GOOGLE MAPS
     # ========================================================
 
@@ -2268,26 +2838,32 @@ if calcular:
 
     trechos_google = (
         dividir_rota_google_maps(
+
             locais_ordenados,
+
             max_pontos_por_trecho=5,
         )
     )
 
 
+    # ========================================================
+    # UM TRECHO
+    # ========================================================
+
     if len(
         trechos_google
     ) == 1:
 
-        url_google = (
-            gerar_url_google_maps(
-                trechos_google[0]
-            )
-        )
-
-
         st.link_button(
+
             "🧭 Abrir rota no Google Maps",
-            url_google,
+
+            gerar_url_google_maps(
+                trechos_google[
+                    0
+                ]
+            ),
+
             use_container_width=True,
         )
 
@@ -2296,20 +2872,26 @@ if calcular:
             "Opções avançadas de navegação"
         ):
 
-            url_coordenadas = (
-                gerar_url_google_maps(
-                    trechos_google[0],
-                    usar_coordenadas=True,
-                )
-            )
-
-
             st.link_button(
+
                 "📍 Abrir usando coordenadas",
-                url_coordenadas,
+
+                gerar_url_google_maps(
+
+                    trechos_google[
+                        0
+                    ],
+
+                    usar_coordenadas=True,
+                ),
+
                 use_container_width=True,
             )
 
+
+    # ========================================================
+    # VÁRIOS TRECHOS
+    # ========================================================
 
     else:
 
@@ -2325,13 +2907,16 @@ if calcular:
         ):
 
             with st.expander(
+
                 (
                     f"Trecho {numero_trecho}: "
                     f"{trecho[0]['nome']} → "
                     f"{trecho[-1]['nome']}"
                 ),
+
                 expanded=(
-                    numero_trecho == 1
+                    numero_trecho
+                    == 1
                 ),
             ):
 
@@ -2346,60 +2931,41 @@ if calcular:
                     )
 
 
-                url_google = (
-                    gerar_url_google_maps(
-                        trecho
-                    )
-                )
-
-
                 st.link_button(
+
                     (
                         f"🧭 Abrir trecho "
                         f"{numero_trecho} "
                         f"no Google Maps"
                     ),
-                    url_google,
-                    use_container_width=True,
-                )
 
-
-                url_coord = (
                     gerar_url_google_maps(
-                        trecho,
-                        usar_coordenadas=True,
-                    )
+                        trecho
+                    ),
+
+                    use_container_width=True,
                 )
 
 
                 st.link_button(
+
                     "📍 Alternativa por coordenadas",
-                    url_coord,
+
+                    gerar_url_google_maps(
+                        trecho,
+                        usar_coordenadas=True,
+                    ),
+
                     use_container_width=True,
                 )
 
 
     # ========================================================
-    # MAPA
+    # MAPA NA TELA
     # ========================================================
 
     st.subheader(
         "🗺️ Mapa da rota"
-    )
-
-
-    mapa = criar_mapa(
-        geometry=(
-            rota_real[
-                "geometry"
-            ]
-        ),
-        locais_ordenados=(
-            locais_ordenados
-        ),
-        rota_fechada=(
-            voltar_inicio
-        ),
     )
 
 
