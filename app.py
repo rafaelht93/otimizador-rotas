@@ -33,7 +33,6 @@ st.set_page_config(
     layout="wide",
 )
 
-
 st.title("🗺️ Otimizador de Rotas")
 
 st.write(
@@ -65,14 +64,10 @@ with st.sidebar:
     st.header("Configuração")
 
     if ors_configurado:
-        st.success(
-            "OpenRouteService configurado"
-        )
+        st.success("OpenRouteService configurado")
 
     else:
-        st.error(
-            "OpenRouteService não configurado"
-        )
+        st.error("OpenRouteService não configurado")
 
     st.divider()
 
@@ -132,9 +127,7 @@ def obter_matrix_cache_v2(
 ):
 
     return obter_matriz_distancias(
-        coordenadas=list(
-            coordenadas
-        ),
+        coordenadas=list(coordenadas),
         api_key=_api_key,
     )
 
@@ -153,9 +146,7 @@ def obter_directions_cache(
 ):
 
     return obter_rota_completa(
-        coordenadas=list(
-            coordenadas
-        ),
+        coordenadas=list(coordenadas),
         api_key=_api_key,
     )
 
@@ -170,9 +161,7 @@ def buscar_sugestoes(
     focus_lon=None,
 ):
 
-    texto = (
-        searchterm or ""
-    ).strip()
+    texto = (searchterm or "").strip()
 
     if len(texto) < 3:
         return []
@@ -194,7 +183,6 @@ def buscar_sugestoes(
     except ORSError as e:
 
         st.session_state.erro_autocomplete = str(e)
-
         return []
 
     except Exception:
@@ -205,7 +193,6 @@ def buscar_sugestoes(
         )
 
         return []
-
 
     return [
         (
@@ -230,19 +217,13 @@ def campo_local(
 
     if focus:
 
-        focus_lat = focus.get(
-            "latitude"
-        )
-
-        focus_lon = focus.get(
-            "longitude"
-        )
+        focus_lat = focus.get("latitude")
+        focus_lon = focus.get("longitude")
 
     else:
 
         focus_lat = None
         focus_lon = None
-
 
     return st_searchbox(
         buscar_sugestoes,
@@ -259,16 +240,14 @@ def campo_local(
 
 
 # ============================================================
-# UTILITÁRIO - NORMALIZA NOME DE COLUNA
+# NORMALIZA TEXTO
 # ============================================================
 
 def normalizar_texto(
     texto,
 ):
 
-    texto = str(
-        texto
-    ).strip().lower()
+    texto = str(texto).strip().lower()
 
     texto = unicodedata.normalize(
         "NFKD",
@@ -287,6 +266,218 @@ def normalizar_texto(
 
 
 # ============================================================
+# LOCALIZA COLUNA ENDEREÇO
+# ============================================================
+
+def localizar_coluna_endereco(
+    dataframe,
+):
+
+    for coluna in dataframe.columns:
+
+        if normalizar_texto(
+            coluna
+        ) == "endereco":
+
+            return coluna
+
+    return None
+
+
+# ============================================================
+# DECODIFICA CSV
+# ============================================================
+
+def decodificar_csv(
+    bytes_arquivo,
+):
+
+    try:
+        return bytes_arquivo.decode(
+            "utf-8-sig"
+        )
+
+    except UnicodeDecodeError:
+        return bytes_arquivo.decode(
+            "latin1"
+        )
+
+
+# ============================================================
+# REMOVE ASPAS EXTERNAS
+# ============================================================
+
+def limpar_linha_csv_simples(
+    linha,
+):
+
+    valor = linha.strip()
+
+    if (
+        len(valor) >= 2
+        and
+        (
+            (
+                valor.startswith('"')
+                and
+                valor.endswith('"')
+            )
+            or
+            (
+                valor.startswith("'")
+                and
+                valor.endswith("'")
+            )
+        )
+    ):
+
+        valor = valor[
+            1:-1
+        ]
+
+        valor = valor.replace(
+            '""',
+            '"',
+        )
+
+    return valor.strip()
+
+
+# ============================================================
+# LEITURA ROBUSTA DE CSV
+# ============================================================
+
+def ler_csv_robusto(
+    bytes_arquivo,
+):
+    """
+    Aceita, entre outros:
+
+    1) CSV de uma única coluna:
+
+       endereco
+       Havan, Brusque, SC
+       Prefeitura Municipal de Brusque, Brusque, SC
+
+       Nesse caso as vírgulas pertencem ao endereço e NÃO
+       devem ser interpretadas como separadores.
+
+    2) CSV separado por ponto e vírgula:
+
+       endereco;observacao
+       Havan, Brusque, SC;cliente 1
+
+    3) CSV convencional separado por vírgula:
+
+       endereco,observacao
+       "Havan, Brusque, SC","cliente 1"
+    """
+
+    texto = decodificar_csv(
+        bytes_arquivo
+    )
+
+    linhas = [
+        linha
+        for linha in texto.splitlines()
+        if linha.strip()
+    ]
+
+    if not linhas:
+
+        raise ValueError(
+            "O arquivo CSV está vazio."
+        )
+
+    # ========================================================
+    # CASO ESPECIAL:
+    # CABEÇALHO ÚNICO "endereco"
+    # ========================================================
+    #
+    # Esse tratamento é importante porque um detector
+    # automático de delimitador pode confundir as vírgulas
+    # existentes dentro dos próprios endereços.
+    # ========================================================
+
+    cabecalho_simples = (
+        normalizar_texto(
+            linhas[0]
+            .strip()
+            .strip('"')
+            .strip("'")
+        )
+    )
+
+    if cabecalho_simples == "endereco":
+
+        enderecos = []
+
+        for linha in linhas[1:]:
+
+            endereco = (
+                limpar_linha_csv_simples(
+                    linha
+                )
+            )
+
+            if endereco:
+                enderecos.append(
+                    endereco
+                )
+
+        return pd.DataFrame(
+            {
+                "endereco":
+                    enderecos
+            }
+        )
+
+    # ========================================================
+    # CSV COM MAIS DE UMA COLUNA
+    # ========================================================
+
+    erros = []
+
+    for separador in (
+        ";",
+        ",",
+        "\t",
+    ):
+
+        try:
+
+            dataframe = pd.read_csv(
+                io.StringIO(
+                    texto
+                ),
+                sep=separador,
+            )
+
+        except Exception as e:
+
+            erros.append(
+                str(e)
+            )
+
+            continue
+
+        if (
+            localizar_coluna_endereco(
+                dataframe
+            )
+            is not None
+        ):
+
+            return dataframe
+
+    raise ValueError(
+        "Não foi possível identificar a coluna "
+        "'endereco' no CSV. Use o modelo fornecido "
+        "pelo aplicativo."
+    )
+
+
+# ============================================================
 # LEITURA CSV / EXCEL
 # ============================================================
 
@@ -302,7 +493,6 @@ def ler_arquivo_paradas(
         arquivo.name.lower()
     )
 
-
     # ========================================================
     # CSV
     # ========================================================
@@ -311,28 +501,9 @@ def ler_arquivo_paradas(
         ".csv"
     ):
 
-        try:
-
-            dataframe = pd.read_csv(
-                io.BytesIO(
-                    bytes_arquivo
-                ),
-                sep=None,
-                engine="python",
-                encoding="utf-8-sig",
-            )
-
-        except UnicodeDecodeError:
-
-            dataframe = pd.read_csv(
-                io.BytesIO(
-                    bytes_arquivo
-                ),
-                sep=None,
-                engine="python",
-                encoding="latin1",
-            )
-
+        dataframe = ler_csv_robusto(
+            bytes_arquivo
+        )
 
     # ========================================================
     # EXCEL
@@ -349,7 +520,6 @@ def ler_arquivo_paradas(
             engine="openpyxl",
         )
 
-
     else:
 
         raise ValueError(
@@ -357,33 +527,21 @@ def ler_arquivo_paradas(
             "Utilize CSV ou XLSX."
         )
 
-
     if dataframe.empty:
 
         raise ValueError(
             "O arquivo não possui dados."
         )
 
-
     # ========================================================
-    # PROCURA COLUNA ENDEREÇO
+    # COLUNA ENDEREÇO
     # ========================================================
-
-    mapa_colunas = {
-        normalizar_texto(
-            coluna
-        ): coluna
-        for coluna
-        in dataframe.columns
-    }
-
 
     coluna_endereco = (
-        mapa_colunas.get(
-            "endereco"
+        localizar_coluna_endereco(
+            dataframe
         )
     )
-
 
     if coluna_endereco is None:
 
@@ -392,7 +550,6 @@ def ler_arquivo_paradas(
             "uma coluna chamada 'endereco' "
             "ou 'endereço'."
         )
-
 
     # ========================================================
     # REMOVE VAZIOS
@@ -409,18 +566,14 @@ def ler_arquivo_paradas(
         ):
             continue
 
-
         endereco = str(
             valor
         ).strip()
 
-
         if endereco:
-
             enderecos.append(
                 endereco
             )
-
 
     if not enderecos:
 
@@ -429,7 +582,6 @@ def ler_arquivo_paradas(
             "encontrado na coluna."
         )
 
-
     # ========================================================
     # HASH DO ARQUIVO
     # ========================================================
@@ -437,7 +589,6 @@ def ler_arquivo_paradas(
     hash_arquivo = hashlib.sha256(
         bytes_arquivo
     ).hexdigest()[:12]
-
 
     return (
         enderecos,
@@ -460,17 +611,14 @@ def criar_mapa(
             lat,
             lon,
         )
-        for lon, lat
-        in geometry
+        for lon, lat in geometry
     ]
-
 
     if not path:
 
         raise ValueError(
             "A rota não possui geometria."
         )
-
 
     centro = [
         sum(
@@ -484,13 +632,11 @@ def criar_mapa(
         ) / len(path),
     ]
 
-
     mapa = folium.Map(
         location=centro,
         zoom_start=13,
         control_scale=True,
     )
-
 
     folium.PolyLine(
         path,
@@ -499,7 +645,6 @@ def criar_mapa(
     ).add_to(
         mapa
     )
-
 
     if rota_fechada:
 
@@ -512,7 +657,6 @@ def criar_mapa(
         locais_marcadores = (
             locais_ordenados
         )
-
 
     for numero, local in enumerate(
         locais_marcadores,
@@ -538,7 +682,6 @@ def criar_mapa(
         </div>
         """
 
-
         folium.Marker(
             location=[
                 local["latitude"],
@@ -555,7 +698,6 @@ def criar_mapa(
         ).add_to(
             mapa
         )
-
 
     mapa.fit_bounds(
         [
@@ -581,7 +723,6 @@ def criar_mapa(
             ],
         ]
     )
-
 
     return mapa
 
@@ -620,16 +761,13 @@ def montar_referencia_google(
         or "Brazil"
     )
 
-
     componentes = []
-
 
     if nome:
 
         componentes.append(
             str(nome).strip()
         )
-
 
     if street:
 
@@ -649,7 +787,6 @@ def montar_referencia_google(
                 endereco
             )
 
-
     if locality:
 
         locality = str(
@@ -661,7 +798,6 @@ def montar_referencia_google(
             componentes.append(
                 locality
             )
-
 
     if region:
 
@@ -675,7 +811,6 @@ def montar_referencia_google(
                 region
             )
 
-
     if country:
 
         country = str(
@@ -688,11 +823,9 @@ def montar_referencia_google(
                 country
             )
 
-
     referencia = ", ".join(
         componentes
     )
-
 
     if not referencia:
 
@@ -700,7 +833,6 @@ def montar_referencia_google(
             "nome",
             ""
         )
-
 
     return referencia
 
@@ -734,15 +866,13 @@ def gerar_url_google_maps(
 
         return None
 
-
     if usar_coordenadas:
 
         referencias = [
             coordenada_google_maps(
                 local
             )
-            for local
-            in locais_trecho
+            for local in locais_trecho
         ]
 
     else:
@@ -751,10 +881,8 @@ def gerar_url_google_maps(
             montar_referencia_google(
                 local
             )
-            for local
-            in locais_trecho
+            for local in locais_trecho
         ]
-
 
     origem = (
         referencias[0]
@@ -764,7 +892,6 @@ def gerar_url_google_maps(
         referencias[-1]
     )
 
-
     params = {
         "api": "1",
         "origin": origem,
@@ -772,7 +899,6 @@ def gerar_url_google_maps(
         "travelmode": "driving",
         "dir_action": "navigate",
     }
-
 
     if len(
         referencias
@@ -785,7 +911,6 @@ def gerar_url_google_maps(
                 1:-1
             ]
         )
-
 
     return (
         "https://www.google.com/maps/dir/?"
@@ -813,11 +938,8 @@ def dividir_rota_google_maps(
             locais_ordenados
         ]
 
-
     trechos = []
-
     inicio = 0
-
 
     while inicio < (
         len(locais_ordenados) - 1
@@ -830,7 +952,6 @@ def dividir_rota_google_maps(
             len(locais_ordenados) - 1,
         )
 
-
         trecho = (
             locais_ordenados[
                 inicio:
@@ -838,13 +959,11 @@ def dividir_rota_google_maps(
             ]
         )
 
-
         trechos.append(
             trecho
         )
 
         inicio = fim
-
 
     return trechos
 
@@ -973,11 +1092,9 @@ with col_fim:
                 disabled=True,
             )
 
-
         ponto_fim = (
             ponto_inicio
         )
-
 
     else:
 
@@ -1058,7 +1175,6 @@ if modo_entrada == "Digitar manualmente":
         ):
 
             st.session_state.num_paradas += 1
-
             st.rerun()
 
 
@@ -1074,7 +1190,6 @@ if modo_entrada == "Digitar manualmente":
         ):
 
             st.session_state.num_paradas -= 1
-
             st.rerun()
 
 
@@ -1091,7 +1206,6 @@ if modo_entrada == "Digitar manualmente":
             ),
             focus=ponto_inicio,
         )
-
 
         paradas.append(
             parada
@@ -1112,11 +1226,19 @@ else:
     )
 
 
+    # ========================================================
+    # MODELO CSV
+    # ========================================================
+    #
+    # Usamos ponto e vírgula e uma segunda coluna para
+    # tornar o arquivo mais amigável ao Excel brasileiro.
+    # ========================================================
+
     modelo_csv = (
-        "endereco\n"
-        "Havan, Brusque, SC\n"
-        "Prefeitura Municipal de Brusque, SC\n"
-        "UNIFEBE, Brusque, SC\n"
+        'endereco;observacao\n'
+        '"Havan, Brusque, SC";teste\n'
+        '"Prefeitura Municipal de Brusque, Brusque, SC";teste\n'
+        '"UNIFEBE, Brusque, SC";teste\n'
     )
 
 
@@ -1169,13 +1291,7 @@ else:
         # LIMITE PRELIMINAR
         # ====================================================
 
-        if voltar_inicio:
-
-            limite_paradas = 48
-
-        else:
-
-            limite_paradas = 48
+        limite_paradas = 48
 
 
         if (
@@ -1208,10 +1324,6 @@ else:
         )
 
 
-        # ====================================================
-        # CAMPOS IMPORTADOS
-        # ====================================================
-
         for i, endereco in enumerate(
             enderecos_importados
         ):
@@ -1229,7 +1341,6 @@ else:
                 focus=ponto_inicio,
                 default_searchterm=endereco,
             )
-
 
             paradas.append(
                 parada
@@ -1390,7 +1501,7 @@ if calcular:
 
 
     # ========================================================
-    # VERIFICA CAMPOS IMPORTADOS NÃO CONFIRMADOS
+    # CAMPOS IMPORTADOS NÃO CONFIRMADOS
     # ========================================================
 
     if (
