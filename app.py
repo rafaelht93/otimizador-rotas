@@ -41,8 +41,8 @@ st.set_page_config(
 st.title("🗺️ Otimizador de Rotas")
 
 st.write(
-    "Informe os locais da rota manualmente ou importe uma lista "
-    "por CSV/Excel. O sistema calculará a melhor sequência de visita."
+    "Informe os locais manualmente ou importe uma lista por "
+    "CSV/Excel. O sistema calculará a melhor sequência da rota."
 )
 
 
@@ -104,6 +104,28 @@ def buscar_sugestoes_cache(
 
 
 # ============================================================
+# CACHE PARA ENDEREÇOS IMPORTADOS
+# ============================================================
+
+@st.cache_data(
+    ttl=3600,
+    show_spinner=False,
+)
+def buscar_endereco_importado_cache(
+    texto,
+    _api_key,
+):
+
+    return autocomplete_enderecos(
+        texto=texto,
+        api_key=_api_key,
+        limite=6,
+        focus_lat=None,
+        focus_lon=None,
+    )
+
+
+# ============================================================
 # CACHE MATRIX
 # ============================================================
 
@@ -143,7 +165,7 @@ def obter_directions_cache(
 
 
 # ============================================================
-# AUTOCOMPLETE
+# AUTOCOMPLETE MANUAL
 # ============================================================
 
 def buscar_sugestoes(
@@ -195,7 +217,7 @@ def buscar_sugestoes(
 
 
 # ============================================================
-# CAMPO AUTOCOMPLETE MANUAL
+# CAMPO MANUAL
 # ============================================================
 
 def campo_local(
@@ -263,7 +285,7 @@ def normalizar_texto(
 
 
 # ============================================================
-# LOCALIZA COLUNA ENDEREÇO
+# COLUNA ENDEREÇO
 # ============================================================
 
 def localizar_coluna_endereco(
@@ -303,7 +325,7 @@ def decodificar_csv(
 
 
 # ============================================================
-# LIMPA LINHA CSV SIMPLES
+# LIMPEZA CSV SIMPLES
 # ============================================================
 
 def limpar_linha_csv_simples(
@@ -343,7 +365,7 @@ def limpar_linha_csv_simples(
 
 
 # ============================================================
-# LEITURA ROBUSTA DO CSV
+# LEITOR CSV ROBUSTO
 # ============================================================
 
 def ler_csv_robusto(
@@ -369,10 +391,10 @@ def ler_csv_robusto(
 
 
     # ========================================================
-    # CSV COM UMA ÚNICA COLUNA "endereco"
+    # CSV DE UMA ÚNICA COLUNA
     # ========================================================
 
-    cabecalho_simples = normalizar_texto(
+    cabecalho = normalizar_texto(
         linhas[0]
         .strip()
         .strip('"')
@@ -380,7 +402,7 @@ def ler_csv_robusto(
     )
 
 
-    if cabecalho_simples == "endereco":
+    if cabecalho == "endereco":
 
         enderecos = []
 
@@ -389,10 +411,8 @@ def ler_csv_robusto(
             1:
         ]:
 
-            endereco = (
-                limpar_linha_csv_simples(
-                    linha
-                )
+            endereco = limpar_linha_csv_simples(
+                linha
             )
 
 
@@ -447,30 +467,22 @@ def ler_csv_robusto(
 
     raise ValueError(
         "Não foi possível identificar a coluna "
-        "'endereco' no CSV."
+        "'endereco' no arquivo CSV."
     )
 
 
 # ============================================================
-# LEITURA CSV / EXCEL
+# LEITURA CSV / XLSX
 # ============================================================
 
 def ler_arquivo_paradas(
     arquivo,
 ):
 
-    bytes_arquivo = (
-        arquivo.getvalue()
-    )
+    bytes_arquivo = arquivo.getvalue()
 
-    nome_arquivo = (
-        arquivo.name.lower()
-    )
+    nome_arquivo = arquivo.name.lower()
 
-
-    # ========================================================
-    # CSV
-    # ========================================================
 
     if nome_arquivo.endswith(
         ".csv"
@@ -480,10 +492,6 @@ def ler_arquivo_paradas(
             bytes_arquivo
         )
 
-
-    # ========================================================
-    # EXCEL
-    # ========================================================
 
     elif nome_arquivo.endswith(
         ".xlsx"
@@ -512,10 +520,8 @@ def ler_arquivo_paradas(
         )
 
 
-    coluna_endereco = (
-        localizar_coluna_endereco(
-            dataframe
-        )
+    coluna_endereco = localizar_coluna_endereco(
+        dataframe
     )
 
 
@@ -572,7 +578,7 @@ def ler_arquivo_paradas(
 
 
 # ============================================================
-# CONVERTE LOCAL PELIAS
+# CONVERSÃO DE LOCAL
 # ============================================================
 
 def converter_local(
@@ -913,7 +919,7 @@ def montar_referencia_google(
 
 
 # ============================================================
-# COORDENADA GOOGLE
+# GOOGLE COORDENADA
 # ============================================================
 
 def coordenada_google_maps(
@@ -927,7 +933,7 @@ def coordenada_google_maps(
 
 
 # ============================================================
-# URL GOOGLE MAPS
+# GOOGLE URL
 # ============================================================
 
 def gerar_url_google_maps(
@@ -963,13 +969,9 @@ def gerar_url_google_maps(
         ]
 
 
-    origem = (
-        referencias[0]
-    )
+    origem = referencias[0]
 
-    destino = (
-        referencias[-1]
-    )
+    destino = referencias[-1]
 
 
     params = {
@@ -1003,7 +1005,7 @@ def gerar_url_google_maps(
 
 
 # ============================================================
-# DIVISÃO GOOGLE MAPS
+# DIVISÃO GOOGLE
 # ============================================================
 
 def dividir_rota_google_maps(
@@ -1057,7 +1059,6 @@ def dividir_rota_google_maps(
             trecho
         )
 
-
         inicio = fim
 
 
@@ -1065,7 +1066,7 @@ def dividir_rota_google_maps(
 
 
 # ============================================================
-# TIPO DE ENTRADA
+# MODO DE ENTRADA
 # ============================================================
 
 st.subheader(
@@ -1083,18 +1084,10 @@ modo_entrada = st.radio(
 )
 
 
-# ============================================================
-# VARIÁVEIS COMUNS
-# ============================================================
-
 ponto_inicio = None
-
 ponto_fim = None
-
 paradas = []
-
 voltar_inicio = False
-
 importacao_pronta = False
 
 
@@ -1107,10 +1100,6 @@ if modo_entrada == "Digitar manualmente":
     voltar_inicio = st.checkbox(
         "🔄 Retornar ao ponto inicial",
         key="manual_voltar_inicio",
-        help=(
-            "Quando marcado, a rota começa "
-            "e termina no mesmo local."
-        ),
     )
 
 
@@ -1118,10 +1107,6 @@ if modo_entrada == "Digitar manualmente":
         st.columns(2)
     )
 
-
-    # ========================================================
-    # INÍCIO
-    # ========================================================
 
     with col_inicio:
 
@@ -1133,10 +1118,6 @@ if modo_entrada == "Digitar manualmente":
             ),
         )
 
-
-    # ========================================================
-    # FIM
-    # ========================================================
 
     with col_fim:
 
@@ -1193,7 +1174,7 @@ if modo_entrada == "Digitar manualmente":
 
 
     # ========================================================
-    # PARADAS
+    # PARADAS MANUAIS
     # ========================================================
 
     st.subheader(
@@ -1261,20 +1242,17 @@ if modo_entrada == "Digitar manualmente":
 
 
 # ============================================================
-# MODO IMPORTAÇÃO
+# IMPORTAÇÃO
 # ============================================================
 
 else:
 
     st.info(
-        "Importe a lista e confirme cada endereço. "
-        "Depois escolha qual local será o início e qual será o fim."
+        "O sistema localizará automaticamente cada endereço "
+        "e utilizará o primeiro resultado encontrado. "
+        "Você poderá alterar apenas os que estiverem incorretos."
     )
 
-
-    # ========================================================
-    # MODELO CSV
-    # ========================================================
 
     modelo_csv = (
         'endereco;observacao\n'
@@ -1302,15 +1280,8 @@ else:
             "csv",
             "xlsx",
         ],
-        help=(
-            "Formatos aceitos: CSV e Excel XLSX."
-        ),
     )
 
-
-    # ========================================================
-    # ARQUIVO CARREGADO
-    # ========================================================
 
     if arquivo is not None:
 
@@ -1338,8 +1309,7 @@ else:
         ) > 50:
 
             st.error(
-                "O arquivo possui mais de 50 locais. "
-                "O limite atual é de 50."
+                "O arquivo possui mais de 50 locais."
             )
 
             st.stop()
@@ -1351,171 +1321,178 @@ else:
         )
 
 
-        st.write(
-            "### Confirmação dos endereços"
-        )
-
-
-        st.caption(
-            "Para cada linha, confira o texto de busca "
-            "e selecione explicitamente o local correto."
-        )
-
-
-        locais_confirmados = []
-
-
         # ====================================================
-        # CONFIRMAÇÃO EXPLÍCITA
+        # BUSCA AUTOMÁTICA
         # ====================================================
 
-        for indice, endereco in enumerate(
-            enderecos_importados,
-            start=1,
+        resultados_por_endereco = []
+
+
+        with st.spinner(
+            "Localizando automaticamente "
+            "os endereços importados..."
         ):
 
-            with st.container(
-                border=True
-            ):
+            for endereco in enderecos_importados:
 
-                st.write(
-                    f"**Local {indice}**"
-                )
+                try:
 
-
-                consulta = st.text_input(
-                    "Texto de busca",
-                    value=endereco,
-                    key=(
-                        f"import_query_"
-                        f"{hash_arquivo}_"
-                        f"{indice}"
-                    ),
-                )
-
-
-                resultados_importacao = []
-
-
-                if (
-                    ors_configurado
-                    and
-                    len(
-                        consulta.strip()
-                    ) >= 3
-                ):
-
-                    try:
-
-                        resultados_importacao = (
-                            buscar_sugestoes_cache(
-                                consulta.strip(),
-                                None,
-                                None,
-                                ORS_KEY,
-                            )
+                    candidatos = (
+                        buscar_endereco_importado_cache(
+                            endereco,
+                            ORS_KEY,
                         )
-
-                    except ORSError as e:
-
-                        st.warning(
-                            str(e)
-                        )
-
-                    except Exception:
-
-                        st.warning(
-                            "Não foi possível buscar "
-                            "as opções deste endereço."
-                        )
-
-
-                opcoes = [
-                    None
-                ] + resultados_importacao
-
-
-                selecionado = st.selectbox(
-                    "Confirme o local",
-                    options=opcoes,
-                    index=0,
-                    key=(
-                        f"import_confirm_"
-                        f"{hash_arquivo}_"
-                        f"{indice}"
-                    ),
-                    format_func=(
-                        lambda item:
-                        "Selecione uma opção..."
-                        if item is None
-                        else item[
-                            "label"
-                        ]
-                    ),
-                )
-
-
-                if selecionado is not None:
-
-                    st.success(
-                        "Local confirmado"
                     )
 
+                except Exception:
 
-                locais_confirmados.append(
-                    selecionado
+                    candidatos = []
+
+
+                resultados_por_endereco.append(
+                    candidatos
                 )
 
 
         # ====================================================
-        # PENDÊNCIAS
+        # ENDEREÇOS NÃO ENCONTRADOS
         # ====================================================
 
-        pendentes = [
+        nao_encontrados = [
             indice + 1
-            for indice, local
+            for indice, candidatos
             in enumerate(
-                locais_confirmados
+                resultados_por_endereco
             )
-            if local is None
+            if not candidatos
         ]
 
 
-        if pendentes:
+        if nao_encontrados:
 
-            st.warning(
-                "Ainda faltam confirmar os locais: "
+            st.error(
+                "Não foi possível localizar automaticamente "
+                "os seguintes itens: "
                 + ", ".join(
                     str(numero)
-                    for numero in pendentes
+                    for numero in nao_encontrados
                 )
                 + "."
             )
 
 
         # ====================================================
-        # TODOS CONFIRMADOS
+        # REVISÃO
         # ====================================================
 
-        else:
+        st.subheader(
+            "🔎 Endereços identificados"
+        )
+
+
+        st.caption(
+            "O primeiro resultado encontrado já está selecionado. "
+            "Só altere algum item se perceber que o local está errado."
+        )
+
+
+        locais_confirmados = []
+
+
+        for indice, (
+            endereco_original,
+            candidatos,
+        ) in enumerate(
+            zip(
+                enderecos_importados,
+                resultados_por_endereco,
+            ),
+            start=1,
+        ):
+
+            if not candidatos:
+
+                st.error(
+                    f"{indice}. {endereco_original} — "
+                    "nenhum resultado encontrado."
+                )
+
+                locais_confirmados.append(
+                    None
+                )
+
+                continue
+
+
+            # =================================================
+            # PRIMEIRO RESULTADO É O PADRÃO
+            # =================================================
+
+            indice_escolhido = st.selectbox(
+                f"{indice}. {endereco_original}",
+                options=list(
+                    range(
+                        len(candidatos)
+                    )
+                ),
+                index=0,
+                key=(
+                    f"import_result_"
+                    f"{hash_arquivo}_"
+                    f"{indice}"
+                ),
+                format_func=(
+                    lambda posicao,
+                    lista=candidatos:
+                    lista[
+                        posicao
+                    ][
+                        "label"
+                    ]
+                ),
+            )
+
+
+            local_escolhido = candidatos[
+                indice_escolhido
+            ]
+
+
+            locais_confirmados.append(
+                local_escolhido
+            )
+
+
+        # ====================================================
+        # PODE CONTINUAR?
+        # ====================================================
+
+        if all(
+            local is not None
+            for local in locais_confirmados
+        ):
 
             importacao_pronta = True
 
 
             st.success(
-                "Todos os endereços foram confirmados."
+                "Todos os endereços foram identificados."
             )
 
 
             st.divider()
 
 
+            # =================================================
+            # INÍCIO / FIM
+            # =================================================
+
             st.subheader(
                 "🚩 Defina o início e o fim da rota"
             )
 
 
-            indices_confirmados = list(
+            indices = list(
                 range(
                     len(
                         locais_confirmados
@@ -1524,48 +1501,41 @@ else:
             )
 
 
-            indice_inicio_importado = (
-                st.selectbox(
-                    "Ponto inicial",
-                    options=indices_confirmados,
-                    key=(
-                        "indice_inicio_importado_"
-                        f"{hash_arquivo}"
-                    ),
-                    format_func=(
-                        lambda indice:
-                        locais_confirmados[
-                            indice
-                        ][
-                            "label"
-                        ]
-                    ),
-                )
+            indice_inicio = st.selectbox(
+                "Ponto inicial",
+                options=indices,
+                key=(
+                    f"inicio_"
+                    f"{hash_arquivo}"
+                ),
+                format_func=(
+                    lambda indice:
+                    (
+                        f"{indice + 1}. "
+                        f"{locais_confirmados[indice]['label']}"
+                    )
+                ),
             )
 
 
             ponto_inicio = (
                 locais_confirmados[
-                    indice_inicio_importado
+                    indice_inicio
                 ]
             )
 
 
-            # =================================================
-            # RETORNO AO INÍCIO
-            # =================================================
-
             voltar_inicio = st.checkbox(
                 "🔄 Retornar ao ponto inicial",
                 key=(
-                    "import_voltar_inicio_"
+                    f"voltar_"
                     f"{hash_arquivo}"
                 ),
             )
 
 
             # =================================================
-            # PONTO FINAL
+            # FINAL
             # =================================================
 
             if voltar_inicio:
@@ -1581,7 +1551,7 @@ else:
                 )
 
 
-                indice_fim_importado = None
+                indice_fim = None
 
 
             else:
@@ -1589,57 +1559,53 @@ else:
                 opcoes_fim = [
                     indice
                     for indice
-                    in indices_confirmados
+                    in indices
                     if indice
-                    != indice_inicio_importado
+                    != indice_inicio
                 ]
 
 
-                indice_fim_importado = (
-                    st.selectbox(
-                        "Ponto final",
-                        options=opcoes_fim,
-                        key=(
-                            "indice_fim_importado_"
-                            f"{hash_arquivo}"
-                        ),
-                        format_func=(
-                            lambda indice:
-                            locais_confirmados[
-                                indice
-                            ][
-                                "label"
-                            ]
-                        ),
-                    )
+                indice_fim = st.selectbox(
+                    "Ponto final",
+                    options=opcoes_fim,
+                    key=(
+                        f"fim_"
+                        f"{hash_arquivo}"
+                    ),
+                    format_func=(
+                        lambda indice:
+                        (
+                            f"{indice + 1}. "
+                            f"{locais_confirmados[indice]['label']}"
+                        )
+                    ),
                 )
 
 
                 ponto_fim = (
                     locais_confirmados[
-                        indice_fim_importado
+                        indice_fim
                     ]
                 )
 
 
             # =================================================
-            # DEMAIS LOCAIS VIRAM PARADAS
+            # RESTANTE = PARADAS
             # =================================================
 
-            indices_excluir = {
-                indice_inicio_importado
+            excluir = {
+                indice_inicio
             }
 
 
             if (
                 not voltar_inicio
                 and
-                indice_fim_importado
-                is not None
+                indice_fim is not None
             ):
 
-                indices_excluir.add(
-                    indice_fim_importado
+                excluir.add(
+                    indice_fim
                 )
 
 
@@ -1650,7 +1616,7 @@ else:
                     locais_confirmados
                 )
                 if indice
-                not in indices_excluir
+                not in excluir
             ]
 
 
@@ -1658,23 +1624,6 @@ else:
                 f"Paradas intermediárias: "
                 f"**{len(paradas)}**"
             )
-
-
-            if paradas:
-
-                with st.expander(
-                    "Ver paradas intermediárias"
-                ):
-
-                    for numero, parada in enumerate(
-                        paradas,
-                        start=1,
-                    ):
-
-                        st.write(
-                            f"**{numero}.** "
-                            f"{parada['label']}"
-                        )
 
 
     else:
@@ -1685,7 +1634,7 @@ else:
 
 
 # ============================================================
-# ERRO AUTOCOMPLETE
+# ERROS AUTOCOMPLETE
 # ============================================================
 
 if st.session_state.erro_autocomplete:
@@ -1739,16 +1688,15 @@ with col_modo:
 if objetivo == "Menor distância":
 
     st.info(
-        "📏 **Menor distância:** "
-        "o algoritmo minimizará os quilômetros percorridos."
+        "📏 O algoritmo minimizará "
+        "a distância total percorrida."
     )
 
 else:
 
     st.info(
-        "⏱️ **Menor tempo:** "
-        "o algoritmo minimizará o tempo estimado "
-        "de deslocamento."
+        "⏱️ O algoritmo minimizará "
+        "o tempo estimado de deslocamento."
     )
 
 
@@ -1786,10 +1734,6 @@ calcular = st.button(
 
 if calcular:
 
-    # ========================================================
-    # API
-    # ========================================================
-
     if not ors_configurado:
 
         st.error(
@@ -1799,10 +1743,6 @@ if calcular:
         st.stop()
 
 
-    # ========================================================
-    # IMPORTAÇÃO AINDA NÃO CONFIRMADA
-    # ========================================================
-
     if (
         modo_entrada
         == "Importar CSV/Excel"
@@ -1811,16 +1751,12 @@ if calcular:
     ):
 
         st.error(
-            "Confirme todos os endereços importados "
-            "antes de calcular a rota."
+            "Existem endereços importados "
+            "que não foram localizados."
         )
 
         st.stop()
 
-
-    # ========================================================
-    # INÍCIO
-    # ========================================================
 
     if not ponto_inicio:
 
@@ -1830,10 +1766,6 @@ if calcular:
 
         st.stop()
 
-
-    # ========================================================
-    # FIM
-    # ========================================================
 
     if (
         not voltar_inicio
@@ -1847,10 +1779,6 @@ if calcular:
 
         st.stop()
 
-
-    # ========================================================
-    # PARADAS VÁLIDAS
-    # ========================================================
 
     paradas_validas = [
         parada
@@ -1867,15 +1795,15 @@ if calcular:
     ):
 
         st.error(
-            "A rota precisa possuir pelo menos "
-            "uma parada além do ponto inicial."
+            "A rota precisa possuir "
+            "pelo menos uma parada."
         )
 
         st.stop()
 
 
     # ========================================================
-    # MONTA LOCAIS DO SOLVER
+    # MONTA LISTA DO SOLVER
     # ========================================================
 
     locais = [
@@ -1953,23 +1881,12 @@ if calcular:
     # LIMITES
     # ========================================================
 
-    if voltar_inicio:
-
-        max_locais = 49
-
-    else:
-
-        max_locais = 50
-
-
     if len(
         locais
-    ) > max_locais:
+    ) > 50:
 
         st.error(
-            f"Esta rota possui {len(locais)} locais. "
-            f"O limite atual para esta configuração "
-            f"é {max_locais}."
+            "O limite atual é de 50 locais."
         )
 
         st.stop()
@@ -1988,10 +1905,6 @@ if calcular:
 
         st.stop()
 
-
-    # ========================================================
-    # COORDENADAS
-    # ========================================================
 
     coordenadas = tuple(
         (
@@ -2027,13 +1940,8 @@ if calcular:
 
     try:
 
-        # ====================================================
-        # MATRIX
-        # ====================================================
-
         with st.spinner(
-            "Calculando distâncias e tempos "
-            "entre os locais..."
+            "Calculando distâncias e tempos..."
         ):
 
             matrix_data = (
@@ -2073,10 +1981,6 @@ if calcular:
             st.stop()
 
 
-        # ====================================================
-        # OBJETIVO
-        # ====================================================
-
         if objetivo == "Menor distância":
 
             matrix_otimizacao = (
@@ -2094,35 +1998,21 @@ if calcular:
             )
 
 
-        # ====================================================
-        # OTIMIZAÇÃO
-        # ====================================================
-
         with st.spinner(
             "Procurando a melhor rota..."
         ):
 
-            resultado = (
-                otimizar_rota(
-                    matrix_m=(
-                        matrix_otimizacao
-                    ),
-                    start_idx=start_idx,
-                    end_idx=end_idx,
-                    modo=modo,
-                )
+            resultado = otimizar_rota(
+                matrix_m=matrix_otimizacao,
+                start_idx=start_idx,
+                end_idx=end_idx,
+                modo=modo,
             )
 
 
-        # ====================================================
-        # ORDEM ENCONTRADA
-        # ====================================================
-
-        route = (
-            resultado[
-                "route"
-            ]
-        )
+        route = resultado[
+            "route"
+        ]
 
 
         locais_ordenados = [
@@ -2145,10 +2035,6 @@ if calcular:
             in locais_ordenados
         )
 
-
-        # ====================================================
-        # DIRECTIONS
-        # ====================================================
 
         with st.spinner(
             "Montando a rota pelas ruas..."
@@ -2189,7 +2075,7 @@ if calcular:
 
 
     # ========================================================
-    # DISTÂNCIA
+    # RESULTADOS
     # ========================================================
 
     distancia_km = (
@@ -2199,10 +2085,6 @@ if calcular:
         / 1000
     )
 
-
-    # ========================================================
-    # TEMPO
-    # ========================================================
 
     minutos_total = round(
         rota_real[
@@ -2237,10 +2119,6 @@ if calcular:
             f"{minutos} min"
         )
 
-
-    # ========================================================
-    # RESULTADOS
-    # ========================================================
 
     st.success(
         "Rota calculada com sucesso."
@@ -2295,7 +2173,7 @@ if calcular:
 
 
     # ========================================================
-    # STATUS SOLVER
+    # STATUS
     # ========================================================
 
     if (
@@ -2396,10 +2274,6 @@ if calcular:
     )
 
 
-    # ========================================================
-    # UM ÚNICO TRECHO
-    # ========================================================
-
     if len(
         trechos_google
     ) == 1:
@@ -2437,17 +2311,11 @@ if calcular:
             )
 
 
-    # ========================================================
-    # VÁRIOS TRECHOS
-    # ========================================================
-
     else:
 
         st.info(
             f"A rota foi dividida em "
-            f"{len(trechos_google)} trechos "
-            "para melhorar a compatibilidade "
-            "com o Google Maps no celular."
+            f"{len(trechos_google)} trechos."
         )
 
 
@@ -2509,12 +2377,6 @@ if calcular:
                     url_coord,
                     use_container_width=True,
                 )
-
-
-        st.caption(
-            "O último local de cada trecho também é "
-            "o primeiro local do trecho seguinte."
-        )
 
 
     # ========================================================
