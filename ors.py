@@ -15,9 +15,7 @@ ORS_BASE_URL = (
 )
 
 DEFAULT_TIMEOUT = 20
-
 MAX_RETRIES = 4
-
 INITIAL_BACKOFF = 1.0
 
 
@@ -37,15 +35,6 @@ def _headers(
     api_key,
     accept="application/json",
 ):
-    """
-    Monta os headers das requisições.
-
-    application/json:
-        Pelias e Matrix.
-
-    application/geo+json:
-        Directions /geojson.
-    """
 
     if not api_key:
         raise ORSError(
@@ -109,7 +98,6 @@ def _request_with_retries(
             )
 
             time.sleep(delay)
-
             backoff *= 2
 
             continue
@@ -129,7 +117,6 @@ def _request_with_retries(
             )
 
             time.sleep(delay)
-
             backoff *= 2
 
             continue
@@ -165,7 +152,9 @@ def _request_with_retries(
             if retry_after:
 
                 try:
-                    delay = float(retry_after)
+                    delay = float(
+                        retry_after
+                    )
 
                 except ValueError:
                     delay = (
@@ -180,7 +169,6 @@ def _request_with_retries(
                 )
 
             time.sleep(delay)
-
             backoff *= 2
 
             continue
@@ -189,7 +177,7 @@ def _request_with_retries(
 
 
     # ========================================================
-    # TRATAMENTO DOS ERROS HTTP
+    # ERROS HTTP
     # ========================================================
 
     status = response.status_code
@@ -245,7 +233,7 @@ def _request_with_retries(
 
 
 # ============================================================
-# NORMALIZA RESULTADO PELIAS
+# NORMALIZA RESULTADO DO PELIAS
 # ============================================================
 
 def _normalizar_feature(
@@ -482,7 +470,7 @@ def buscar_enderecos(
 
 
 # ============================================================
-# GEOCODIFICAÇÃO
+# GEOCODIFICAÇÃO SIMPLES
 # ============================================================
 
 def geocodificar(
@@ -517,6 +505,15 @@ def obter_matriz_distancias(
     api_key,
     profile="driving-car",
 ):
+    """
+    Retorna DUAS matrizes:
+
+    distancias:
+        metros
+
+    duracoes:
+        segundos
+    """
 
     if not coordenadas:
         raise ORSError(
@@ -552,7 +549,8 @@ def obter_matriz_distancias(
     payload = {
         "locations": locations,
         "metrics": [
-            "distance"
+            "distance",
+            "duration",
         ],
         "units": "m",
     }
@@ -581,13 +579,28 @@ def obter_matriz_distancias(
         "distances"
     )
 
+    durations = data.get(
+        "durations"
+    )
+
+
     if distances is None:
         raise ORSError(
             "A Matrix API não retornou "
             "as distâncias."
         )
 
-    return distances
+    if durations is None:
+        raise ORSError(
+            "A Matrix API não retornou "
+            "os tempos de deslocamento."
+        )
+
+
+    return {
+        "distancias": distances,
+        "duracoes": durations,
+    }
 
 
 # ============================================================
@@ -619,9 +632,6 @@ def obter_rota_completa(
         f"/geojson"
     )
 
-    # ORS usa:
-    # [longitude, latitude]
-
     coordinates = [
         [
             float(lon),
@@ -636,13 +646,6 @@ def obter_rota_completa(
         "instructions": False,
         "preference": "recommended",
     }
-
-    # ========================================================
-    # IMPORTANTE:
-    #
-    # Este endpoint retorna GeoJSON.
-    # Portanto usamos application/geo+json.
-    # ========================================================
 
     response = _request_with_retries(
         "POST",
