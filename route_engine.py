@@ -1,1245 +1,1050 @@
-import folium
-import streamlit as st
+import os
 
-from streamlit_folium import st_folium
-from streamlit_searchbox import st_searchbox
+import numpy as np
 
-from ors import (
-    autocomplete_enderecos,
-    obter_matriz_distancias,
-    obter_rota_completa,
-    ORSError,
+from ortools.constraint_solver import (
+    pywrapcp,
+    routing_enums_pb2,
 )
 
-from route_engine import (
-    otimizar_rota,
-    RouteOptimizationError,
-)
+from ortools.sat.python import cp_model
 
 
 # ============================================================
-# CONFIGURAÇÃO DA PÁGINA
+# CONFIGURAÇÕES
 # ============================================================
 
-st.set_page_config(
-    page_title="Otimizador de Rotas",
-    page_icon="🗺️",
-    layout="wide",
-)
-
-
-# ============================================================
-# TÍTULO
-# ============================================================
-
-st.title(
-    "🗺️ Otimizador de Rotas"
-)
-
-st.write(
-    "Informe o ponto inicial, o ponto final e as paradas. "
-    "Selecione os locais encontrados e o sistema calculará "
-    "a melhor ordem para percorrê-los."
-)
-
-
-# ============================================================
-# OPENROUTESERVICE
-# ============================================================
-
-try:
-
-    ORS_KEY = st.secrets[
-        "ORS_KEY"
-    ]
-
-    ors_configurado = True
-
-except Exception:
-
-    ORS_KEY = None
-
-    ors_configurado = False
-
-
-# ============================================================
-# SIDEBAR
-# ============================================================
-
-with st.sidebar:
-
-    st.header(
-        "Configuração"
-    )
-
-    if ors_configurado:
-
-        st.success(
-            "OpenRouteService configurado"
-        )
-
-    else:
-
-        st.error(
-            "OpenRouteService não configurado"
-        )
-
-    st.divider()
-
-    st.caption(
-        "Depois que o ponto inicial for escolhido, "
-        "as outras pesquisas priorizam locais "
-        "próximos dele."
-    )
-
-
-# ============================================================
-# SESSION STATE
-# ============================================================
-
-if "num_paradas" not in st.session_state:
-
-    st.session_state.num_paradas = 1
-
-
-if "erro_autocomplete" not in st.session_state:
-
-    st.session_state.erro_autocomplete = None
-
-
-# ============================================================
-# CACHE AUTOCOMPLETE
-# ============================================================
-
-@st.cache_data(
-    ttl=300,
-    show_spinner=False,
-)
-def buscar_sugestoes_cache(
-    texto,
-    focus_lat,
-    focus_lon,
-    _api_key,
-):
-
-    return autocomplete_enderecos(
-        texto=texto,
-        api_key=_api_key,
-        limite=8,
-        focus_lat=focus_lat,
-        focus_lon=focus_lon,
-    )
-
-
-# ============================================================
-# CACHE MATRIX
-# ============================================================
-
-@st.cache_data(
-    ttl=3600,
-    show_spinner=False,
-)
-def obter_matrix_cache(
-    coordenadas,
-    _api_key,
-):
-
-    return obter_matriz_distancias(
-        coordenadas=list(
-            coordenadas
-        ),
-        api_key=_api_key,
-    )
-
-
-# ============================================================
-# CACHE DIRECTIONS
-# ============================================================
-
-@st.cache_data(
-    ttl=3600,
-    show_spinner=False,
-)
-def obter_directions_cache(
-    coordenadas,
-    _api_key,
-):
-
-    return obter_rota_completa(
-        coordenadas=list(
-            coordenadas
-        ),
-        api_key=_api_key,
-    )
-
-
-# ============================================================
-# AUTOCOMPLETE
-# ============================================================
-
-def buscar_sugestoes(
-    searchterm,
-    focus_lat=None,
-    focus_lon=None,
-):
-
-    texto = searchterm.strip()
-
-    if len(texto) < 3:
-        return []
-
-    if not ors_configurado:
-        return []
-
-
-    try:
-
-        resultados = (
-            buscar_sugestoes_cache(
-                texto,
-                focus_lat,
-                focus_lon,
-                ORS_KEY,
-            )
-        )
-
-        st.session_state.erro_autocomplete = (
-            None
-        )
-
-    except ORSError as e:
-
-        st.session_state.erro_autocomplete = (
-            str(e)
-        )
-
-        return []
-
-    except Exception:
-
-        st.session_state.erro_autocomplete = (
-            "Não foi possível pesquisar "
-            "o local neste momento."
-        )
-
-        return []
-
-
-    return [
-        (
-            resultado["label"],
-            resultado,
-        )
-        for resultado
-        in resultados
-    ]
-
-
-# ============================================================
-# CAMPO DE LOCAL
-# ============================================================
-
-def campo_local(
-    chave,
-    label,
-    placeholder,
-    focus=None,
-):
-
-    if focus:
-
-        focus_lat = focus.get(
-            "latitude"
-        )
-
-        focus_lon = focus.get(
-            "longitude"
-        )
-
-    else:
-
-        focus_lat = None
-        focus_lon = None
-
-
-    return st_searchbox(
-        buscar_sugestoes,
-        key=chave,
-        label=label,
-        placeholder=placeholder,
-        debounce=400,
-        clear_on_submit=False,
-        edit_after_submit="option",
-        focus_lat=focus_lat,
-        focus_lon=focus_lon,
-    )
-
-
-# ============================================================
-# MAPA
-# ============================================================
-
-def criar_mapa(
-    geometry,
-    locais_ordenados,
-    rota_fechada,
-):
-
-    path = [
-        (
-            lat,
-            lon,
-        )
-        for lon, lat
-        in geometry
-    ]
-
-
-    if not path:
-        raise ValueError(
-            "A rota não possui geometria."
-        )
-
-
-    centro = [
-        sum(
-            p[0]
-            for p in path
-        ) / len(path),
-
-        sum(
-            p[1]
-            for p in path
-        ) / len(path),
-    ]
-
-
-    mapa = folium.Map(
-        location=centro,
-        zoom_start=13,
-        control_scale=True,
-    )
-
-
-    folium.PolyLine(
-        path,
-        weight=5,
-        opacity=0.8,
-    ).add_to(
-        mapa
-    )
-
-
-    if rota_fechada:
-
-        locais_marcadores = (
-            locais_ordenados[:-1]
-        )
-
-    else:
-
-        locais_marcadores = (
-            locais_ordenados
-        )
-
-
-    for numero, local in enumerate(
-        locais_marcadores,
-        start=1,
-    ):
-
-        html = f"""
-        <div style="
-            background:#1e3a8a;
-            color:white;
-            border-radius:50%;
-            width:30px;
-            height:30px;
-            display:flex;
-            align-items:center;
-            justify-content:center;
-            font-size:12px;
-            font-weight:700;
-            border:2px solid white;
-            box-shadow:0 0 6px rgba(0,0,0,.4);
-        ">
-            {numero}
-        </div>
-        """
-
-
-        folium.Marker(
-            location=[
-                local["latitude"],
-                local["longitude"],
-            ],
-            tooltip=(
-                f"{numero}. "
-                f"{local['nome']}"
-            ),
-            popup=local[
-                "nome"
-            ],
-            icon=folium.DivIcon(
-                html=html
-            ),
-        ).add_to(
-            mapa
-        )
-
-
-    mapa.fit_bounds(
-        [
-            [
-                min(
-                    p[0]
-                    for p in path
-                ),
-                min(
-                    p[1]
-                    for p in path
-                ),
-            ],
-            [
-                max(
-                    p[0]
-                    for p in path
-                ),
-                max(
-                    p[1]
-                    for p in path
-                ),
-            ],
-        ]
-    )
-
-
-    return mapa
-
-
-# ============================================================
-# TIPO DA ROTA
-# ============================================================
-
-voltar_inicio = st.checkbox(
-    "🔄 Retornar ao ponto inicial",
-    help=(
-        "Quando marcado, a rota começa "
-        "e termina no mesmo local."
+# Tempo usado no modo rápido
+FAST_TIME_SECONDS = 5
+
+# Tempo de cada metaheurística no modo preciso
+PRECISE_HEURISTIC_TIME_SECONDS = 8
+
+# Tempo máximo adicional do CP-SAT
+PRECISE_CP_SAT_TIME_SECONDS = 60
+
+# Limita o número de CPUs para não sobrecarregar
+# o servidor do Streamlit.
+CPU_COUNT = max(
+    1,
+    min(
+        os.cpu_count() or 1,
+        8,
     ),
 )
 
 
 # ============================================================
-# INÍCIO E FIM
+# EXCEÇÃO PERSONALIZADA
 # ============================================================
 
-col_inicio, col_fim = (
-    st.columns(2)
-)
+class RouteOptimizationError(Exception):
+    pass
 
 
-with col_inicio:
+# ============================================================
+# PREPARAÇÃO DA MATRIZ
+# ============================================================
 
-    ponto_inicio = campo_local(
-        chave="busca_ponto_inicio",
-        label="📍 Ponto inicial",
-        placeholder=(
-            "Digite pelo menos 3 letras..."
-        ),
+def _preparar_matriz(matrix):
+    """
+    Converte a matriz recebida para inteiros.
+
+    A matriz pode representar:
+
+    - metros, quando otimizamos distância;
+    - segundos, quando otimizamos tempo.
+
+    Para o algoritmo isso não faz diferença:
+    ele simplesmente minimiza os valores.
+    """
+
+    try:
+
+        matrix = np.asarray(
+            matrix,
+            dtype=float,
+        )
+
+    except Exception as e:
+
+        raise RouteOptimizationError(
+            "Não foi possível interpretar "
+            "a matriz de otimização."
+        ) from e
+
+
+    # ========================================================
+    # MATRIZ QUADRADA
+    # ========================================================
+
+    if (
+        matrix.ndim != 2
+        or
+        matrix.shape[0] != matrix.shape[1]
+    ):
+
+        raise RouteOptimizationError(
+            "A matriz precisa ser quadrada."
+        )
+
+
+    # ========================================================
+    # VALORES INVÁLIDOS
+    # ========================================================
+
+    if not np.all(
+        np.isfinite(matrix)
+    ):
+
+        raise RouteOptimizationError(
+            "A matriz possui trechos inválidos "
+            "ou inacessíveis."
+        )
+
+
+    # ========================================================
+    # VALORES NEGATIVOS
+    # ========================================================
+
+    if np.any(
+        matrix < 0
+    ):
+
+        raise RouteOptimizationError(
+            "A matriz possui valores negativos."
+        )
+
+
+    # OR-Tools trabalha melhor com inteiros.
+    return np.rint(
+        matrix
+    ).astype(
+        np.int64
     )
 
 
-with col_fim:
+# ============================================================
+# CALCULA CUSTO DA ROTA
+# ============================================================
 
-    if voltar_inicio:
+def _custo_rota(
+    route,
+    matrix,
+):
+    """
+    Soma o custo de todos os arcos da rota.
+    """
 
-        if ponto_inicio:
+    return sum(
+        int(
+            matrix[i, j]
+        )
+        for i, j
+        in zip(
+            route[:-1],
+            route[1:],
+        )
+    )
 
-            st.text_input(
-                "🏁 Ponto final",
-                value=ponto_inicio[
-                    "label"
-                ],
-                disabled=True,
+
+# ============================================================
+# SOLVER ROUTING
+# ============================================================
+
+def _executar_metaheuristica(
+    matrix,
+    start_idx,
+    end_idx,
+    metaheuristica,
+    nome,
+    tempo,
+):
+    """
+    Executa uma estratégia do OR-Tools Routing.
+    """
+
+    n = len(
+        matrix
+    )
+
+    rota_fechada = (
+        start_idx == end_idx
+    )
+
+
+    # ========================================================
+    # ROUTING INDEX MANAGER
+    # ========================================================
+
+    if rota_fechada:
+
+        manager = (
+            pywrapcp.RoutingIndexManager(
+                n,
+                1,
+                start_idx,
             )
+        )
+
+    else:
+
+        manager = (
+            pywrapcp.RoutingIndexManager(
+                n,
+                1,
+                [start_idx],
+                [end_idx],
+            )
+        )
+
+
+    routing = (
+        pywrapcp.RoutingModel(
+            manager
+        )
+    )
+
+
+    # ========================================================
+    # CALLBACK DE CUSTO
+    # ========================================================
+
+    def cost_callback(
+        from_index,
+        to_index,
+    ):
+
+        from_node = (
+            manager.IndexToNode(
+                from_index
+            )
+        )
+
+        to_node = (
+            manager.IndexToNode(
+                to_index
+            )
+        )
+
+        return int(
+            matrix[
+                from_node,
+                to_node
+            ]
+        )
+
+
+    callback_index = (
+        routing.RegisterTransitCallback(
+            cost_callback
+        )
+    )
+
+
+    routing.SetArcCostEvaluatorOfAllVehicles(
+        callback_index
+    )
+
+
+    # ========================================================
+    # PARÂMETROS DE BUSCA
+    # ========================================================
+
+    params = (
+        pywrapcp.DefaultRoutingSearchParameters()
+    )
+
+
+    params.first_solution_strategy = (
+        routing_enums_pb2
+        .FirstSolutionStrategy
+        .PATH_CHEAPEST_ARC
+    )
+
+
+    params.local_search_metaheuristic = (
+        metaheuristica
+    )
+
+
+    params.time_limit.seconds = int(
+        tempo
+    )
+
+
+    params.use_full_propagation = False
+
+    params.log_search = False
+
+
+    # ========================================================
+    # EXECUÇÃO
+    # ========================================================
+
+    solution = (
+        routing.SolveWithParameters(
+            params
+        )
+    )
+
+
+    if not solution:
+        return None
+
+
+    # ========================================================
+    # RECONSTRUÇÃO DA ROTA
+    # ========================================================
+
+    route = []
+
+    index = routing.Start(
+        0
+    )
+
+
+    while not routing.IsEnd(
+        index
+    ):
+
+        route.append(
+            manager.IndexToNode(
+                index
+            )
+        )
+
+        index = solution.Value(
+            routing.NextVar(
+                index
+            )
+        )
+
+
+    route.append(
+        manager.IndexToNode(
+            index
+        )
+    )
+
+
+    custo = (
+        _custo_rota(
+            route,
+            matrix,
+        )
+    )
+
+
+    return {
+        "route": route,
+        "objective_cost": custo,
+        "metodo": nome,
+    }
+
+
+# ============================================================
+# MODO RÁPIDO
+# ============================================================
+
+def _modo_rapido(
+    matrix,
+    start_idx,
+    end_idx,
+):
+    """
+    Usa Guided Local Search.
+
+    É rápido e normalmente encontra soluções
+    muito boas para uso cotidiano.
+    """
+
+    resultado = (
+        _executar_metaheuristica(
+            matrix=matrix,
+            start_idx=start_idx,
+            end_idx=end_idx,
+            metaheuristica=(
+                routing_enums_pb2
+                .LocalSearchMetaheuristic
+                .GUIDED_LOCAL_SEARCH
+            ),
+            nome="Guided Local Search",
+            tempo=FAST_TIME_SECONDS,
+        )
+    )
+
+
+    if resultado is None:
+
+        raise RouteOptimizationError(
+            "Não foi possível encontrar "
+            "uma rota válida."
+        )
+
+
+    resultado.update(
+        {
+            "status": "OTIMIZADA",
+            "gap_percent": None,
+            "lower_bound": None,
+        }
+    )
+
+
+    return resultado
+
+
+# ============================================================
+# MODO PRECISO - HEURÍSTICAS
+# ============================================================
+
+def _melhor_heuristica_precisa(
+    matrix,
+    start_idx,
+    end_idx,
+):
+    """
+    Testa três metaheurísticas diferentes
+    e mantém o melhor resultado.
+    """
+
+    estrategias = [
+        (
+            "Guided Local Search",
+            routing_enums_pb2
+            .LocalSearchMetaheuristic
+            .GUIDED_LOCAL_SEARCH,
+        ),
+        (
+            "Tabu Search",
+            routing_enums_pb2
+            .LocalSearchMetaheuristic
+            .TABU_SEARCH,
+        ),
+        (
+            "Simulated Annealing",
+            routing_enums_pb2
+            .LocalSearchMetaheuristic
+            .SIMULATED_ANNEALING,
+        ),
+    ]
+
+
+    resultados = []
+
+
+    for nome, estrategia in estrategias:
+
+        resultado = (
+            _executar_metaheuristica(
+                matrix=matrix,
+                start_idx=start_idx,
+                end_idx=end_idx,
+                metaheuristica=estrategia,
+                nome=nome,
+                tempo=(
+                    PRECISE_HEURISTIC_TIME_SECONDS
+                ),
+            )
+        )
+
+
+        if resultado is not None:
+
+            resultados.append(
+                resultado
+            )
+
+
+    if not resultados:
+
+        raise RouteOptimizationError(
+            "Nenhuma estratégia conseguiu "
+            "encontrar uma rota."
+        )
+
+
+    return min(
+        resultados,
+        key=lambda x: x[
+            "objective_cost"
+        ],
+    )
+
+
+# ============================================================
+# CP-SAT
+# ============================================================
+
+def _executar_cp_sat(
+    matrix,
+    start_idx,
+    end_idx,
+    resultado_inicial,
+):
+    """
+    Usa o resultado heurístico como limite superior
+    e tenta melhorar ou comprovar a solução.
+    """
+
+    n = len(
+        matrix
+    )
+
+
+    rota_inicial = (
+        resultado_inicial[
+            "route"
+        ]
+    )
+
+
+    custo_inicial = int(
+        resultado_inicial[
+            "objective_cost"
+        ]
+    )
+
+
+    rota_aberta = (
+        start_idx != end_idx
+    )
+
+
+    # ========================================================
+    # MODELO
+    # ========================================================
+
+    model = (
+        cp_model.CpModel()
+    )
+
+
+    arc_vars = {}
+
+    arcs = []
+
+
+    # ========================================================
+    # ARCOS REAIS
+    # ========================================================
+
+    for i in range(n):
+
+        for j in range(n):
+
+            if i == j:
+                continue
+
+
+            # Em rota aberta:
+            #
+            # START -> ... -> END
+            #
+            # não permitimos:
+            #
+            # algo -> START
+            # END -> algo
+            #
+            # porque depois criaremos artificialmente:
+            #
+            # END -> START
+            #
+            # com custo zero.
+
+            if rota_aberta:
+
+                if j == start_idx:
+                    continue
+
+                if i == end_idx:
+                    continue
+
+
+            var = (
+                model.NewBoolVar(
+                    f"x_{i}_{j}"
+                )
+            )
+
+
+            arc_vars[
+                (i, j)
+            ] = var
+
+
+            arcs.append(
+                (
+                    i,
+                    j,
+                    var,
+                )
+            )
+
+
+    # ========================================================
+    # ARCO ARTIFICIAL PARA ROTA ABERTA
+    # ========================================================
+
+    arco_artificial = None
+
+
+    if rota_aberta:
+
+        arco_artificial = (
+            model.NewBoolVar(
+                "artificial_end_start"
+            )
+        )
+
+
+        model.Add(
+            arco_artificial == 1
+        )
+
+
+        arcs.append(
+            (
+                end_idx,
+                start_idx,
+                arco_artificial,
+            )
+        )
+
+
+    # ========================================================
+    # CIRCUITO
+    # ========================================================
+
+    model.AddCircuit(
+        arcs
+    )
+
+
+    # ========================================================
+    # OBJETIVO
+    # ========================================================
+
+    objective = sum(
+        int(
+            matrix[i, j]
+        ) * var
+        for (
+            i,
+            j
+        ), var
+        in arc_vars.items()
+    )
+
+
+    # Já temos uma solução válida.
+    # Não aceitamos uma solução pior.
+    model.Add(
+        objective <= custo_inicial
+    )
+
+
+    model.Minimize(
+        objective
+    )
+
+
+    # ========================================================
+    # HINT
+    # ========================================================
+
+    arcos_iniciais = set(
+        zip(
+            rota_inicial[:-1],
+            rota_inicial[1:],
+        )
+    )
+
+
+    for arco, var in arc_vars.items():
+
+        if arco in arcos_iniciais:
+
+            valor_hint = 1
 
         else:
 
-            st.text_input(
-                "🏁 Ponto final",
-                value=(
-                    "Selecione primeiro "
-                    "o ponto inicial"
-                ),
-                disabled=True,
+            valor_hint = 0
+
+
+        model.AddHint(
+            var,
+            valor_hint,
+        )
+
+
+    if arco_artificial is not None:
+
+        model.AddHint(
+            arco_artificial,
+            1,
+        )
+
+
+    # ========================================================
+    # SOLVER
+    # ========================================================
+
+    solver = (
+        cp_model.CpSolver()
+    )
+
+
+    solver.parameters.max_time_in_seconds = (
+        PRECISE_CP_SAT_TIME_SECONDS
+    )
+
+
+    solver.parameters.num_search_workers = (
+        CPU_COUNT
+    )
+
+
+    solver.parameters.log_search_progress = (
+        False
+    )
+
+
+    status = (
+        solver.Solve(
+            model
+        )
+    )
+
+
+    # ========================================================
+    # FALLBACK
+    # ========================================================
+
+    if status not in (
+        cp_model.OPTIMAL,
+        cp_model.FEASIBLE,
+    ):
+
+        resultado = dict(
+            resultado_inicial
+        )
+
+
+        resultado.update(
+            {
+                "status": "MELHOR HEURÍSTICA",
+                "gap_percent": None,
+                "lower_bound": None,
+            }
+        )
+
+
+        return resultado
+
+
+    # ========================================================
+    # ARCOS ESCOLHIDOS
+    # ========================================================
+
+    next_node = {}
+
+
+    for (
+        i,
+        j
+    ), var in arc_vars.items():
+
+        if solver.BooleanValue(
+            var
+        ):
+
+            next_node[i] = j
+
+
+    # ========================================================
+    # RECONSTRÓI ROTA ABERTA
+    # ========================================================
+
+    if rota_aberta:
+
+        route = [
+            start_idx
+        ]
+
+
+        atual = (
+            start_idx
+        )
+
+
+        while atual != end_idx:
+
+            if atual not in next_node:
+
+                raise RouteOptimizationError(
+                    "Erro ao reconstruir "
+                    "a rota otimizada."
+                )
+
+
+            atual = (
+                next_node[
+                    atual
+                ]
             )
 
 
-        ponto_fim = ponto_inicio
+            route.append(
+                atual
+            )
+
+
+            if len(route) > n:
+
+                raise RouteOptimizationError(
+                    "Foi detectado um ciclo inesperado."
+                )
+
+
+        # Precisamos visitar todos os pontos exatamente uma vez.
+
+        if (
+            len(route) != n
+            or
+            len(set(route)) != n
+        ):
+
+            raise RouteOptimizationError(
+                "A rota otimizada não contém "
+                "todos os pontos."
+            )
+
+
+    # ========================================================
+    # RECONSTRÓI ROTA FECHADA
+    # ========================================================
+
+    else:
+
+        route = [
+            start_idx
+        ]
+
+
+        atual = (
+            start_idx
+        )
+
+
+        for _ in range(n):
+
+            if atual not in next_node:
+
+                raise RouteOptimizationError(
+                    "Erro ao reconstruir "
+                    "o circuito."
+                )
+
+
+            atual = (
+                next_node[
+                    atual
+                ]
+            )
+
+
+            route.append(
+                atual
+            )
+
+
+            if atual == start_idx:
+                break
+
+
+        # Para N locais:
+        #
+        # [0, 3, 2, 1, 0]
+        #
+        # terá N + 1 elementos.
+
+        if (
+            len(route) != n + 1
+            or
+            route[-1] != start_idx
+            or
+            len(
+                set(
+                    route[:-1]
+                )
+            ) != n
+        ):
+
+            raise RouteOptimizationError(
+                "O circuito não contém "
+                "todos os pontos."
+            )
+
+
+    # ========================================================
+    # RESULTADOS DO CP-SAT
+    # ========================================================
+
+    custo = float(
+        solver.ObjectiveValue()
+    )
+
+
+    lower_bound = float(
+        solver.BestObjectiveBound()
+    )
+
+
+    # ========================================================
+    # GAP
+    # ========================================================
+
+    if custo > 0:
+
+        gap = max(
+            0.0,
+            (
+                custo
+                - lower_bound
+            )
+            / custo
+            * 100,
+        )
+
+    else:
+
+        gap = 0.0
+
+
+    # ========================================================
+    # STATUS
+    # ========================================================
+
+    if status == cp_model.OPTIMAL:
+
+        status_text = (
+            "ÓTIMA COMPROVADA"
+        )
+
+        gap = 0.0
 
 
     else:
 
-        ponto_fim = campo_local(
-            chave="busca_ponto_fim",
-            label="🏁 Ponto final",
-            placeholder=(
-                "Digite pelo menos 3 letras..."
-            ),
-            focus=ponto_inicio,
+        status_text = (
+            "MELHOR ENCONTRADA"
         )
 
 
-# ============================================================
-# FOCO GEOGRÁFICO
-# ============================================================
-
-if ponto_inicio:
-
-    st.caption(
-        "📌 As demais buscas estão priorizando "
-        f"locais próximos de "
-        f"**{ponto_inicio['label']}**."
-    )
+    return {
+        "route": route,
+        "objective_cost": custo,
+        "metodo": "CP-SAT",
+        "status": status_text,
+        "gap_percent": gap,
+        "lower_bound": lower_bound,
+    }
 
 
 # ============================================================
-# ERRO AUTOCOMPLETE
+# FUNÇÃO PÚBLICA PRINCIPAL
 # ============================================================
 
-if st.session_state.erro_autocomplete:
-
-    st.warning(
-        st.session_state.erro_autocomplete
-    )
-
-
-# ============================================================
-# PARADAS
-# ============================================================
-
-st.subheader(
-    "Paradas intermediárias"
-)
-
-
-col_adicionar, col_remover, _ = (
-    st.columns(
-        [1, 1, 4]
-    )
-)
-
-
-with col_adicionar:
-
-    if st.button(
-        "➕ Adicionar parada",
-        use_container_width=True,
-    ):
-
-        st.session_state.num_paradas += 1
-
-        st.rerun()
-
-
-with col_remover:
-
-    if st.button(
-        "➖ Remover parada",
-        disabled=(
-            st.session_state.num_paradas
-            <= 1
-        ),
-        use_container_width=True,
-    ):
-
-        st.session_state.num_paradas -= 1
-
-        st.rerun()
-
-
-paradas = []
-
-
-for i in range(
-    st.session_state.num_paradas
+def otimizar_rota(
+    matrix_m,
+    start_idx,
+    end_idx,
+    modo="Rápido",
 ):
+    """
+    Função usada pelo app.py.
 
-    parada = campo_local(
-        chave=f"busca_parada_{i}",
-        label=f"Parada {i + 1}",
-        placeholder=(
-            "Digite um endereço "
-            "ou estabelecimento..."
-        ),
-        focus=ponto_inicio,
-    )
+    matrix_m pode conter:
 
-    paradas.append(
-        parada
-    )
+    - distâncias em metros;
+    - durações em segundos.
 
+    O algoritmo minimiza a matriz recebida.
+    """
 
-# ============================================================
-# CONFIGURAÇÃO DA OTIMIZAÇÃO
-# ============================================================
-
-st.divider()
-
-
-col_objetivo, col_modo = (
-    st.columns(2)
-)
-
-
-with col_objetivo:
-
-    objetivo = st.radio(
-        "Otimizar por",
-        [
-            "Menor distância",
-            "Menor tempo",
-        ],
-        horizontal=True,
+    matrix = (
+        _preparar_matriz(
+            matrix_m
+        )
     )
 
 
-with col_modo:
-
-    modo = st.radio(
-        "Modo de otimização",
-        [
-            "Rápido",
-            "Preciso",
-        ],
-        horizontal=True,
+    n = len(
+        matrix
     )
 
-
-if objetivo == "Menor distância":
-
-    st.info(
-        "📏 O sistema buscará a sequência "
-        "que reduz a distância total percorrida."
-    )
-
-else:
-
-    st.info(
-        "⏱️ O sistema buscará a sequência "
-        "que reduz o tempo estimado de deslocamento."
-    )
-
-
-if modo == "Preciso":
-
-    st.caption(
-        "🎯 O modo preciso executa várias estratégias "
-        "e tenta encontrar ou comprovar uma solução "
-        "ainda melhor."
-    )
-
-
-# ============================================================
-# BOTÃO CALCULAR
-# ============================================================
-
-st.divider()
-
-
-calcular = st.button(
-    "🚗 Calcular melhor rota",
-    type="primary",
-    use_container_width=True,
-)
-
-
-# ============================================================
-# EXECUÇÃO
-# ============================================================
-
-if calcular:
 
     # ========================================================
     # VALIDAÇÕES
     # ========================================================
 
-    if not ors_configurado:
+    if n < 2:
 
-        st.error(
-            "OpenRouteService não configurado."
+        raise RouteOptimizationError(
+            "São necessários pelo menos "
+            "dois locais."
         )
 
-        st.stop()
 
-
-    if not ponto_inicio:
-
-        st.error(
-            "Selecione o ponto inicial "
-            "nas sugestões da busca."
-        )
-
-        st.stop()
-
-
-    if (
-        not voltar_inicio
-        and
-        not ponto_fim
+    if not (
+        0 <= start_idx < n
     ):
 
-        st.error(
-            "Selecione o ponto final "
-            "nas sugestões da busca."
+        raise RouteOptimizationError(
+            "Ponto inicial inválido."
         )
 
-        st.stop()
 
-
-    paradas_validas = [
-        parada
-        for parada
-        in paradas
-        if parada is not None
-    ]
-
-
-    if (
-        voltar_inicio
-        and
-        not paradas_validas
+    if not (
+        0 <= end_idx < n
     ):
 
-        st.error(
-            "Adicione pelo menos uma parada."
-        )
-
-        st.stop()
-
-
-    # ========================================================
-    # LOCAIS
-    # ========================================================
-
-    locais = [
-        {
-            "nome": ponto_inicio[
-                "label"
-            ],
-            "latitude": ponto_inicio[
-                "latitude"
-            ],
-            "longitude": ponto_inicio[
-                "longitude"
-            ],
-            "tipo": "Início",
-        }
-    ]
-
-
-    for numero, parada in enumerate(
-        paradas_validas,
-        start=1,
-    ):
-
-        locais.append(
-            {
-                "nome": parada[
-                    "label"
-                ],
-                "latitude": parada[
-                    "latitude"
-                ],
-                "longitude": parada[
-                    "longitude"
-                ],
-                "tipo": (
-                    f"Parada {numero}"
-                ),
-            }
-        )
-
-
-    if not voltar_inicio:
-
-        locais.append(
-            {
-                "nome": ponto_fim[
-                    "label"
-                ],
-                "latitude": ponto_fim[
-                    "latitude"
-                ],
-                "longitude": ponto_fim[
-                    "longitude"
-                ],
-                "tipo": "Fim",
-            }
+        raise RouteOptimizationError(
+            "Ponto final inválido."
         )
 
 
     # ========================================================
-    # VERIFICA DUPLICADOS
+    # MODO RÁPIDO
     # ========================================================
 
-    coordenadas_unicas = set()
+    if modo.lower() == "rápido":
 
-    duplicados = []
-
-
-    for local in locais:
-
-        chave = (
-            round(
-                local[
-                    "latitude"
-                ],
-                6,
-            ),
-            round(
-                local[
-                    "longitude"
-                ],
-                6,
-            ),
+        return _modo_rapido(
+            matrix,
+            start_idx,
+            end_idx,
         )
 
 
-        if chave in coordenadas_unicas:
-
-            duplicados.append(
-                local[
-                    "nome"
-                ]
-            )
-
-
-        coordenadas_unicas.add(
-            chave
-        )
-
-
-    if duplicados:
-
-        st.error(
-            "O mesmo local foi selecionado "
-            "mais de uma vez."
-        )
-
-        st.stop()
-
-
     # ========================================================
-    # LIMITES
+    # MODO PRECISO
     # ========================================================
 
-    if voltar_inicio:
-
-        max_locais = 49
-
-    else:
-
-        max_locais = 50
-
-
-    if len(locais) > max_locais:
-
-        st.error(
-            f"Esta rota possui "
-            f"{len(locais)} locais. "
-            f"O limite atual é "
-            f"{max_locais}."
+    melhor = (
+        _melhor_heuristica_precisa(
+            matrix,
+            start_idx,
+            end_idx,
         )
-
-        st.stop()
-
-
-    # ========================================================
-    # COORDENADAS
-    # ========================================================
-
-    coordenadas = tuple(
-        (
-            local[
-                "latitude"
-            ],
-            local[
-                "longitude"
-            ],
-        )
-        for local
-        in locais
     )
 
 
-    start_idx = 0
-
-
-    if voltar_inicio:
-
-        end_idx = 0
-
-    else:
-
-        end_idx = (
-            len(locais) - 1
-        )
-
-
-    # ========================================================
-    # CÁLCULO
-    # ========================================================
-
-    try:
-
-        # ====================================================
-        # MATRIX
-        # ====================================================
-
-        with st.spinner(
-            "Calculando distâncias e tempos "
-            "entre os locais..."
-        ):
-
-            matrix_data = (
-                obter_matrix_cache(
-                    coordenadas,
-                    ORS_KEY,
-                )
-            )
-
-
-        # ====================================================
-        # ESCOLHE OBJETIVO
-        # ====================================================
-
-        if objetivo == "Menor distância":
-
-            matrix_otimizacao = (
-                matrix_data[
-                    "distancias"
-                ]
-            )
-
-        else:
-
-            matrix_otimizacao = (
-                matrix_data[
-                    "duracoes"
-                ]
-            )
-
-
-        # ====================================================
-        # OTIMIZAÇÃO
-        # ====================================================
-
-        with st.spinner(
-            "Procurando a melhor rota..."
-        ):
-
-            resultado = (
-                otimizar_rota(
-                    matrix_m=(
-                        matrix_otimizacao
-                    ),
-                    start_idx=start_idx,
-                    end_idx=end_idx,
-                    modo=modo,
-                )
-            )
-
-
-        # ====================================================
-        # ORDEM
-        # ====================================================
-
-        route = resultado[
-            "route"
-        ]
-
-
-        locais_ordenados = [
-            locais[i]
-            for i
-            in route
-        ]
-
-
-        coordenadas_ordenadas = tuple(
-            (
-                local[
-                    "latitude"
-                ],
-                local[
-                    "longitude"
-                ],
-            )
-            for local
-            in locais_ordenados
-        )
-
-
-        # ====================================================
-        # DIRECTIONS
-        # ====================================================
-
-        with st.spinner(
-            "Montando a rota pelas ruas..."
-        ):
-
-            rota_real = (
-                obter_directions_cache(
-                    coordenadas_ordenadas,
-                    ORS_KEY,
-                )
-            )
-
-
-    except (
-        ORSError,
-        RouteOptimizationError,
-    ) as e:
-
-        st.error(
-            str(e)
-        )
-
-        st.stop()
-
-
-    except Exception as e:
-
-        st.error(
-            "Ocorreu um erro inesperado "
-            "ao calcular a rota."
-        )
-
-        st.exception(
-            e
-        )
-
-        st.stop()
-
-
-    # ========================================================
-    # DISTÂNCIA E TEMPO REAL DA ROTA FINAL
-    # ========================================================
-
-    distancia_km = (
-        rota_real[
-            "distancia_m"
-        ]
-        / 1000
-    )
-
-
-    duracao_min = (
-        rota_real[
-            "duracao_s"
-        ]
-        / 60
-    )
-
-
-    minutos_total = round(
-        duracao_min
-    )
-
-
-    horas = (
-        minutos_total
-        // 60
-    )
-
-
-    minutos = (
-        minutos_total
-        % 60
-    )
-
-
-    if horas:
-
-        tempo_texto = (
-            f"{horas}h "
-            f"{minutos:02d}min"
-        )
-
-    else:
-
-        tempo_texto = (
-            f"{minutos} min"
-        )
-
-
-    # ========================================================
-    # RESULTADO
-    # ========================================================
-
-    st.success(
-        "Rota calculada com sucesso."
-    )
-
-
-    col1, col2, col3, col4 = (
-        st.columns(4)
-    )
-
-
-    with col1:
-
-        st.metric(
-            "Distância total",
-            f"{distancia_km:.2f} km",
-        )
-
-
-    with col2:
-
-        st.metric(
-            "Tempo estimado",
-            tempo_texto,
-        )
-
-
-    with col3:
-
-        st.metric(
-            "Locais",
-            len(locais),
-        )
-
-
-    with col4:
-
-        if objetivo == "Menor distância":
-
-            texto_objetivo = (
-                "Distância"
-            )
-
-        else:
-
-            texto_objetivo = (
-                "Tempo"
-            )
-
-
-        st.metric(
-            "Otimizado por",
-            texto_objetivo,
-        )
-
-
-    # ========================================================
-    # STATUS DO SOLVER
-    # ========================================================
-
-    if (
-        resultado[
-            "status"
-        ]
-        == "ÓTIMA COMPROVADA"
-    ):
-
-        st.success(
-            "🏆 Rota ótima matematicamente comprovada."
-        )
-
-
-    elif (
-        resultado[
-            "gap_percent"
-        ]
-        is not None
-    ):
-
-        st.info(
-            "🎯 Melhor rota encontrada. "
-            f"Gap máximo restante: "
-            f"{resultado['gap_percent']:.3f}%."
-        )
-
-
-    else:
-
-        st.info(
-            "⚡ Rota otimizada em modo rápido."
-        )
-
-
-    # ========================================================
-    # ORDEM DA ROTA
-    # ========================================================
-
-    st.subheader(
-        "📋 Ordem da rota"
-    )
-
-
-    if voltar_inicio:
-
-        lista_exibir = (
-            locais_ordenados[:-1]
-        )
-
-    else:
-
-        lista_exibir = (
-            locais_ordenados
-        )
-
-
-    for numero, local in enumerate(
-        lista_exibir,
-        start=1,
-    ):
-
-        st.write(
-            f"**{numero}.** "
-            f"{local['nome']}"
-        )
-
-
-    if voltar_inicio:
-
-        st.write(
-            f"**{len(lista_exibir) + 1}.** "
-            f"{locais_ordenados[-1]['nome']} "
-            f"_(retorno)_"
-        )
-
-
-    # ========================================================
-    # MAPA
-    # ========================================================
-
-    st.subheader(
-        "🗺️ Mapa da rota"
-    )
-
-
-    mapa = criar_mapa(
-        geometry=(
-            rota_real[
-                "geometry"
-            ]
-        ),
-        locais_ordenados=(
-            locais_ordenados
-        ),
-        rota_fechada=(
-            voltar_inicio
-        ),
-    )
-
-
-    st_folium(
-        mapa,
-        height=600,
-        use_container_width=True,
-        returned_objects=[],
+    return _executar_cp_sat(
+        matrix,
+        start_idx,
+        end_idx,
+        melhor,
     )
