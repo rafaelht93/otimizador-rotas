@@ -1,7 +1,11 @@
-import folium
-import streamlit as st
-
+import hashlib
+import io
+import unicodedata
 from urllib.parse import urlencode
+
+import folium
+import pandas as pd
+import streamlit as st
 
 from streamlit_folium import st_folium
 from streamlit_searchbox import st_searchbox
@@ -30,14 +34,12 @@ st.set_page_config(
 )
 
 
-st.title(
-    "🗺️ Otimizador de Rotas"
-)
+st.title("🗺️ Otimizador de Rotas")
 
 st.write(
     "Informe o ponto inicial, o ponto final e as paradas. "
-    "Selecione os locais encontrados e o sistema calculará "
-    "a melhor ordem para percorrê-los."
+    "Você pode digitar as paradas manualmente ou importá-las "
+    "de um arquivo CSV/Excel."
 )
 
 
@@ -60,18 +62,14 @@ except Exception:
 
 with st.sidebar:
 
-    st.header(
-        "Configuração"
-    )
+    st.header("Configuração")
 
     if ors_configurado:
-
         st.success(
             "OpenRouteService configurado"
         )
 
     else:
-
         st.error(
             "OpenRouteService não configurado"
         )
@@ -89,12 +87,9 @@ with st.sidebar:
 # ============================================================
 
 if "num_paradas" not in st.session_state:
-
     st.session_state.num_paradas = 1
 
-
 if "erro_autocomplete" not in st.session_state:
-
     st.session_state.erro_autocomplete = None
 
 
@@ -123,7 +118,7 @@ def buscar_sugestoes_cache(
 
 
 # ============================================================
-# CACHE MATRIX V2
+# CACHE MATRIX
 # ============================================================
 
 @st.cache_data(
@@ -175,7 +170,9 @@ def buscar_sugestoes(
     focus_lon=None,
 ):
 
-    texto = searchterm.strip()
+    texto = (
+        searchterm or ""
+    ).strip()
 
     if len(texto) < 3:
         return []
@@ -183,29 +180,22 @@ def buscar_sugestoes(
     if not ors_configurado:
         return []
 
-
     try:
 
-        resultados = (
-            buscar_sugestoes_cache(
-                texto,
-                focus_lat,
-                focus_lon,
-                ORS_KEY,
-            )
+        resultados = buscar_sugestoes_cache(
+            texto,
+            focus_lat,
+            focus_lon,
+            ORS_KEY,
         )
 
         st.session_state.erro_autocomplete = None
 
-
     except ORSError as e:
 
-        st.session_state.erro_autocomplete = (
-            str(e)
-        )
+        st.session_state.erro_autocomplete = str(e)
 
         return []
-
 
     except Exception:
 
@@ -235,20 +225,17 @@ def campo_local(
     label,
     placeholder,
     focus=None,
+    default_searchterm="",
 ):
 
     if focus:
 
-        focus_lat = (
-            focus.get(
-                "latitude"
-            )
+        focus_lat = focus.get(
+            "latitude"
         )
 
-        focus_lon = (
-            focus.get(
-                "longitude"
-            )
+        focus_lon = focus.get(
+            "longitude"
         )
 
     else:
@@ -265,8 +252,196 @@ def campo_local(
         debounce=400,
         clear_on_submit=False,
         edit_after_submit="option",
+        default_searchterm=default_searchterm,
         focus_lat=focus_lat,
         focus_lon=focus_lon,
+    )
+
+
+# ============================================================
+# UTILITÁRIO - NORMALIZA NOME DE COLUNA
+# ============================================================
+
+def normalizar_texto(
+    texto,
+):
+
+    texto = str(
+        texto
+    ).strip().lower()
+
+    texto = unicodedata.normalize(
+        "NFKD",
+        texto,
+    )
+
+    texto = "".join(
+        caractere
+        for caractere in texto
+        if not unicodedata.combining(
+            caractere
+        )
+    )
+
+    return texto
+
+
+# ============================================================
+# LEITURA CSV / EXCEL
+# ============================================================
+
+def ler_arquivo_paradas(
+    arquivo,
+):
+
+    bytes_arquivo = (
+        arquivo.getvalue()
+    )
+
+    nome_arquivo = (
+        arquivo.name.lower()
+    )
+
+
+    # ========================================================
+    # CSV
+    # ========================================================
+
+    if nome_arquivo.endswith(
+        ".csv"
+    ):
+
+        try:
+
+            dataframe = pd.read_csv(
+                io.BytesIO(
+                    bytes_arquivo
+                ),
+                sep=None,
+                engine="python",
+                encoding="utf-8-sig",
+            )
+
+        except UnicodeDecodeError:
+
+            dataframe = pd.read_csv(
+                io.BytesIO(
+                    bytes_arquivo
+                ),
+                sep=None,
+                engine="python",
+                encoding="latin1",
+            )
+
+
+    # ========================================================
+    # EXCEL
+    # ========================================================
+
+    elif nome_arquivo.endswith(
+        ".xlsx"
+    ):
+
+        dataframe = pd.read_excel(
+            io.BytesIO(
+                bytes_arquivo
+            ),
+            engine="openpyxl",
+        )
+
+
+    else:
+
+        raise ValueError(
+            "Formato não suportado. "
+            "Utilize CSV ou XLSX."
+        )
+
+
+    if dataframe.empty:
+
+        raise ValueError(
+            "O arquivo não possui dados."
+        )
+
+
+    # ========================================================
+    # PROCURA COLUNA ENDEREÇO
+    # ========================================================
+
+    mapa_colunas = {
+        normalizar_texto(
+            coluna
+        ): coluna
+        for coluna
+        in dataframe.columns
+    }
+
+
+    coluna_endereco = (
+        mapa_colunas.get(
+            "endereco"
+        )
+    )
+
+
+    if coluna_endereco is None:
+
+        raise ValueError(
+            "O arquivo precisa possuir "
+            "uma coluna chamada 'endereco' "
+            "ou 'endereço'."
+        )
+
+
+    # ========================================================
+    # REMOVE VAZIOS
+    # ========================================================
+
+    enderecos = []
+
+    for valor in dataframe[
+        coluna_endereco
+    ].tolist():
+
+        if pd.isna(
+            valor
+        ):
+            continue
+
+
+        endereco = str(
+            valor
+        ).strip()
+
+
+        if endereco:
+
+            enderecos.append(
+                endereco
+            )
+
+
+    if not enderecos:
+
+        raise ValueError(
+            "Nenhum endereço válido foi "
+            "encontrado na coluna."
+        )
+
+
+    # ========================================================
+    # HASH DO ARQUIVO
+    # ========================================================
+
+    hash_arquivo = hashlib.sha256(
+        bytes_arquivo
+    ).hexdigest()[:12]
+
+
+    return (
+        enderecos,
+        hash_arquivo,
     )
 
 
@@ -279,12 +454,6 @@ def criar_mapa(
     locais_ordenados,
     rota_fechada,
 ):
-
-    # ORS:
-    # [longitude, latitude]
-    #
-    # Folium:
-    # [latitude, longitude]
 
     path = [
         (
@@ -418,22 +587,12 @@ def criar_mapa(
 
 
 # ============================================================
-# REFERÊNCIA PARA GOOGLE MAPS
+# REFERÊNCIA GOOGLE MAPS
 # ============================================================
 
 def montar_referencia_google(
     local,
 ):
-    """
-    Monta a melhor referência textual possível
-    para o Google Maps.
-
-    Em vez de enviar somente latitude/longitude,
-    enviamos nome + endereço + cidade + estado.
-
-    Isso permite que o próprio Google identifique
-    o estabelecimento/endereço em sua base.
-    """
 
     nome = (
         local.get("name")
@@ -465,10 +624,6 @@ def montar_referencia_google(
     componentes = []
 
 
-    # ========================================================
-    # NOME DO LOCAL
-    # ========================================================
-
     if nome:
 
         componentes.append(
@@ -476,16 +631,11 @@ def montar_referencia_google(
         )
 
 
-    # ========================================================
-    # ENDEREÇO
-    # ========================================================
-
     if street:
 
         endereco = str(
             street
         ).strip()
-
 
         if housenumber:
 
@@ -493,17 +643,12 @@ def montar_referencia_google(
                 f", {housenumber}"
             )
 
-
         if endereco not in componentes:
 
             componentes.append(
                 endereco
             )
 
-
-    # ========================================================
-    # CIDADE
-    # ========================================================
 
     if locality:
 
@@ -518,10 +663,6 @@ def montar_referencia_google(
             )
 
 
-    # ========================================================
-    # ESTADO
-    # ========================================================
-
     if region:
 
         region = str(
@@ -534,10 +675,6 @@ def montar_referencia_google(
                 region
             )
 
-
-    # ========================================================
-    # PAÍS
-    # ========================================================
 
     if country:
 
@@ -557,10 +694,6 @@ def montar_referencia_google(
     )
 
 
-    # ========================================================
-    # FALLBACK
-    # ========================================================
-
     if not referencia:
 
         referencia = local.get(
@@ -573,7 +706,7 @@ def montar_referencia_google(
 
 
 # ============================================================
-# REFERÊNCIA POR COORDENADA
+# COORDENADA GOOGLE
 # ============================================================
 
 def coordenada_google_maps(
@@ -587,30 +720,20 @@ def coordenada_google_maps(
 
 
 # ============================================================
-# URL PRINCIPAL DO GOOGLE MAPS
+# URL GOOGLE MAPS
 # ============================================================
 
 def gerar_url_google_maps(
     locais_trecho,
     usar_coordenadas=False,
 ):
-    """
-    Gera URL do Google Maps.
 
-    Por padrão utiliza referências textuais completas.
-
-    Se usar_coordenadas=True, utiliza lat/lon
-    como alternativa de fallback.
-    """
-
-    if len(locais_trecho) < 2:
+    if len(
+        locais_trecho
+    ) < 2:
 
         return None
 
-
-    # ========================================================
-    # ESCOLHE REPRESENTAÇÃO
-    # ========================================================
 
     if usar_coordenadas:
 
@@ -633,9 +756,13 @@ def gerar_url_google_maps(
         ]
 
 
-    origem = referencias[0]
+    origem = (
+        referencias[0]
+    )
 
-    destino = referencias[-1]
+    destino = (
+        referencias[-1]
+    )
 
 
     params = {
@@ -647,16 +774,16 @@ def gerar_url_google_maps(
     }
 
 
-    # ========================================================
-    # WAYPOINTS
-    # ========================================================
-
-    if len(referencias) > 2:
+    if len(
+        referencias
+    ) > 2:
 
         params[
             "waypoints"
         ] = "|".join(
-            referencias[1:-1]
+            referencias[
+                1:-1
+            ]
         )
 
 
@@ -669,7 +796,7 @@ def gerar_url_google_maps(
 
 
 # ============================================================
-# DIVIDE A ROTA PARA GOOGLE MAPS
+# DIVISÃO EM TRECHOS
 # ============================================================
 
 def dividir_rota_google_maps(
@@ -704,21 +831,88 @@ def dividir_rota_google_maps(
         )
 
 
-        trecho = locais_ordenados[
-            inicio:
-            fim + 1
-        ]
+        trecho = (
+            locais_ordenados[
+                inicio:
+                fim + 1
+            ]
+        )
 
 
         trechos.append(
             trecho
         )
 
-
         inicio = fim
 
 
     return trechos
+
+
+# ============================================================
+# CONVERTE RESULTADO DO PELIAS
+# ============================================================
+
+def converter_local(
+    origem,
+    tipo,
+):
+
+    return {
+        "nome":
+            origem.get(
+                "label",
+                ""
+            ),
+
+        "latitude":
+            origem[
+                "latitude"
+            ],
+
+        "longitude":
+            origem[
+                "longitude"
+            ],
+
+        "tipo":
+            tipo,
+
+        "name":
+            origem.get(
+                "name"
+            ),
+
+        "street":
+            origem.get(
+                "street"
+            ),
+
+        "housenumber":
+            origem.get(
+                "housenumber"
+            ),
+
+        "locality":
+            origem.get(
+                "locality"
+            ),
+
+        "region":
+            origem.get(
+                "region"
+            ),
+
+        "country":
+            origem.get(
+                "country"
+            ),
+
+        "layer":
+            origem.get(
+                "layer"
+            ),
+    }
 
 
 # ============================================================
@@ -735,7 +929,7 @@ voltar_inicio = st.checkbox(
 
 
 # ============================================================
-# INÍCIO E FIM
+# INÍCIO / FIM
 # ============================================================
 
 col_inicio, col_fim = (
@@ -762,11 +956,9 @@ with col_fim:
 
             st.text_input(
                 "🏁 Ponto final",
-                value=(
-                    ponto_inicio[
-                        "label"
-                    ]
-                ),
+                value=ponto_inicio[
+                    "label"
+                ],
                 disabled=True,
             )
 
@@ -812,10 +1004,6 @@ if ponto_inicio:
     )
 
 
-# ============================================================
-# ERRO DE AUTOCOMPLETE
-# ============================================================
-
 if st.session_state.erro_autocomplete:
 
     st.warning(
@@ -832,70 +1020,227 @@ st.subheader(
 )
 
 
-col_adicionar, col_remover, _ = (
-    st.columns(
-        [
-            1,
-            1,
-            4,
-        ]
-    )
+modo_entrada = st.radio(
+    "Como deseja adicionar as paradas?",
+    [
+        "Digitar manualmente",
+        "Importar CSV/Excel",
+    ],
+    horizontal=True,
 )
 
-
-with col_adicionar:
-
-    if st.button(
-        "➕ Adicionar parada",
-        use_container_width=True,
-    ):
-
-        st.session_state.num_paradas += 1
-
-        st.rerun()
-
-
-with col_remover:
-
-    if st.button(
-        "➖ Remover parada",
-        disabled=(
-            st.session_state.num_paradas
-            <= 1
-        ),
-        use_container_width=True,
-    ):
-
-        st.session_state.num_paradas -= 1
-
-        st.rerun()
-
-
-# ============================================================
-# CAMPOS DAS PARADAS
-# ============================================================
 
 paradas = []
 
 
-for i in range(
-    st.session_state.num_paradas
-):
+# ============================================================
+# PARADAS MANUAIS
+# ============================================================
 
-    parada = campo_local(
-        chave=f"busca_parada_{i}",
-        label=f"Parada {i + 1}",
-        placeholder=(
-            "Digite um endereço "
-            "ou estabelecimento..."
+if modo_entrada == "Digitar manualmente":
+
+    col_adicionar, col_remover, _ = (
+        st.columns(
+            [
+                1,
+                1,
+                4,
+            ]
+        )
+    )
+
+
+    with col_adicionar:
+
+        if st.button(
+            "➕ Adicionar parada",
+            use_container_width=True,
+        ):
+
+            st.session_state.num_paradas += 1
+
+            st.rerun()
+
+
+    with col_remover:
+
+        if st.button(
+            "➖ Remover parada",
+            disabled=(
+                st.session_state.num_paradas
+                <= 1
+            ),
+            use_container_width=True,
+        ):
+
+            st.session_state.num_paradas -= 1
+
+            st.rerun()
+
+
+    for i in range(
+        st.session_state.num_paradas
+    ):
+
+        parada = campo_local(
+            chave=f"busca_parada_{i}",
+            label=f"Parada {i + 1}",
+            placeholder=(
+                "Digite um endereço "
+                "ou estabelecimento..."
+            ),
+            focus=ponto_inicio,
+        )
+
+
+        paradas.append(
+            parada
+        )
+
+
+# ============================================================
+# IMPORTAÇÃO CSV / EXCEL
+# ============================================================
+
+else:
+
+    st.info(
+        "O arquivo deve possuir uma coluna chamada "
+        "**endereco**. Os textos serão carregados nos "
+        "campos de busca, mas você continuará escolhendo "
+        "e confirmando cada local nas sugestões."
+    )
+
+
+    modelo_csv = (
+        "endereco\n"
+        "Havan, Brusque, SC\n"
+        "Prefeitura Municipal de Brusque, SC\n"
+        "UNIFEBE, Brusque, SC\n"
+    )
+
+
+    st.download_button(
+        "⬇️ Baixar modelo CSV",
+        data=modelo_csv.encode(
+            "utf-8-sig"
         ),
-        focus=ponto_inicio,
+        file_name=(
+            "modelo_paradas.csv"
+        ),
+        mime="text/csv",
     )
 
 
-    paradas.append(
-        parada
+    arquivo = st.file_uploader(
+        "Selecione o arquivo",
+        type=[
+            "csv",
+            "xlsx",
+        ],
+        help=(
+            "Formatos aceitos: CSV e Excel XLSX."
+        ),
     )
+
+
+    if arquivo is not None:
+
+        try:
+
+            (
+                enderecos_importados,
+                hash_arquivo,
+            ) = ler_arquivo_paradas(
+                arquivo
+            )
+
+
+        except Exception as e:
+
+            st.error(
+                str(e)
+            )
+
+            st.stop()
+
+
+        # ====================================================
+        # LIMITE PRELIMINAR
+        # ====================================================
+
+        if voltar_inicio:
+
+            limite_paradas = 48
+
+        else:
+
+            limite_paradas = 48
+
+
+        if (
+            len(
+                enderecos_importados
+            )
+            > limite_paradas
+        ):
+
+            st.error(
+                f"O arquivo possui "
+                f"{len(enderecos_importados)} paradas. "
+                f"O limite atual de importação é "
+                f"{limite_paradas}."
+            )
+
+            st.stop()
+
+
+        st.success(
+            f"{len(enderecos_importados)} "
+            "endereços importados."
+        )
+
+
+        st.warning(
+            "⚠️ Confirme cada endereço selecionando "
+            "uma das sugestões. Um texto carregado do "
+            "arquivo ainda não conta como local confirmado."
+        )
+
+
+        # ====================================================
+        # CAMPOS IMPORTADOS
+        # ====================================================
+
+        for i, endereco in enumerate(
+            enderecos_importados
+        ):
+
+            parada = campo_local(
+                chave=(
+                    f"import_{hash_arquivo}_{i}"
+                ),
+                label=(
+                    f"Parada {i + 1}"
+                ),
+                placeholder=(
+                    "Selecione o endereço correto..."
+                ),
+                focus=ponto_inicio,
+                default_searchterm=endereco,
+            )
+
+
+            paradas.append(
+                parada
+            )
+
+
+    else:
+
+        st.caption(
+            "Nenhum arquivo selecionado."
+        )
 
 
 # ============================================================
@@ -1026,6 +1371,65 @@ if calcular:
         st.stop()
 
 
+    # ========================================================
+    # IMPORTAÇÃO SEM ARQUIVO
+    # ========================================================
+
+    if (
+        modo_entrada
+        == "Importar CSV/Excel"
+        and
+        len(paradas) == 0
+    ):
+
+        st.error(
+            "Selecione um arquivo com as paradas."
+        )
+
+        st.stop()
+
+
+    # ========================================================
+    # VERIFICA CAMPOS IMPORTADOS NÃO CONFIRMADOS
+    # ========================================================
+
+    if (
+        modo_entrada
+        == "Importar CSV/Excel"
+    ):
+
+        nao_confirmadas = [
+            indice + 1
+            for indice, parada
+            in enumerate(
+                paradas
+            )
+            if parada is None
+        ]
+
+
+        if nao_confirmadas:
+
+            numeros = ", ".join(
+                str(numero)
+                for numero
+                in nao_confirmadas
+            )
+
+
+            st.error(
+                "Confirme todas as paradas importadas "
+                "selecionando uma opção em cada campo. "
+                f"Pendentes: {numeros}."
+            )
+
+            st.stop()
+
+
+    # ========================================================
+    # MANUAL: IGNORA CAMPOS VAZIOS
+    # ========================================================
+
     paradas_validas = [
         parada
         for parada
@@ -1048,75 +1452,6 @@ if calcular:
 
 
     # ========================================================
-    # FUNÇÃO PARA PRESERVAR DADOS DO PELIAS
-    # ========================================================
-
-    def converter_local(
-        origem,
-        tipo,
-    ):
-
-        return {
-            "nome":
-                origem.get(
-                    "label",
-                    ""
-                ),
-
-            "latitude":
-                origem[
-                    "latitude"
-                ],
-
-            "longitude":
-                origem[
-                    "longitude"
-                ],
-
-            "tipo":
-                tipo,
-
-            # Dados preservados para melhorar
-            # a referência enviada ao Google Maps.
-
-            "name":
-                origem.get(
-                    "name"
-                ),
-
-            "street":
-                origem.get(
-                    "street"
-                ),
-
-            "housenumber":
-                origem.get(
-                    "housenumber"
-                ),
-
-            "locality":
-                origem.get(
-                    "locality"
-                ),
-
-            "region":
-                origem.get(
-                    "region"
-                ),
-
-            "country":
-                origem.get(
-                    "country"
-                ),
-
-            "layer":
-                origem.get(
-                    "layer"
-                ),
-        }
-
-
-    # ========================================================
     # LOCAIS
     # ========================================================
 
@@ -1127,10 +1462,6 @@ if calcular:
         )
     ]
 
-
-    # ========================================================
-    # PARADAS
-    # ========================================================
 
     for numero, parada in enumerate(
         paradas_validas,
@@ -1144,10 +1475,6 @@ if calcular:
             )
         )
 
-
-    # ========================================================
-    # DESTINO
-    # ========================================================
 
     if not voltar_inicio:
 
@@ -1201,18 +1528,25 @@ if calcular:
 
 
     # ========================================================
-    # LIMITE MATRIX
+    # LIMITES
     # ========================================================
 
-    if (
-        len(locais)
-        * len(locais)
-        > 3500
-    ):
+    if voltar_inicio:
+
+        max_locais = 49
+
+    else:
+
+        max_locais = 50
+
+
+    if len(locais) > max_locais:
 
         st.error(
-            "A quantidade de locais ultrapassa "
-            "o limite atual da Matrix API."
+            f"Esta rota possui "
+            f"{len(locais)} locais. "
+            f"O limite atual é "
+            f"{max_locais}."
         )
 
         st.stop()
@@ -1272,10 +1606,6 @@ if calcular:
                 )
             )
 
-
-        # ====================================================
-        # VALIDA MATRIX
-        # ====================================================
 
         if not isinstance(
             matrix_data,
@@ -1360,7 +1690,8 @@ if calcular:
 
         locais_ordenados = [
             locais[indice]
-            for indice in route
+            for indice
+            in route
         ]
 
 
@@ -1421,7 +1752,7 @@ if calcular:
 
 
     # ========================================================
-    # RESULTADOS
+    # DISTÂNCIA / TEMPO
     # ========================================================
 
     distancia_km = (
@@ -1465,6 +1796,10 @@ if calcular:
             f"{minutos} min"
         )
 
+
+    # ========================================================
+    # RESULTADOS
+    # ========================================================
 
     st.success(
         "Rota calculada com sucesso."
@@ -1556,7 +1891,7 @@ if calcular:
 
 
     # ========================================================
-    # ORDEM
+    # ORDEM DA ROTA
     # ========================================================
 
     st.subheader(
@@ -1607,9 +1942,8 @@ if calcular:
 
 
     st.caption(
-        "O Google Maps recebe o nome e o endereço "
-        "dos locais selecionados, em vez de apenas "
-        "suas coordenadas."
+        "A ordem foi calculada pelo Otimizador de Rotas. "
+        "O Google Maps é utilizado apenas para navegação."
     )
 
 
@@ -1621,11 +1955,9 @@ if calcular:
     )
 
 
-    # ========================================================
-    # ROTA ÚNICA
-    # ========================================================
-
-    if len(trechos_google) == 1:
+    if len(
+        trechos_google
+    ) == 1:
 
         url_google = (
             gerar_url_google_maps(
@@ -1641,18 +1973,9 @@ if calcular:
         )
 
 
-        # Fallback opcional
-
         with st.expander(
             "Opções avançadas de navegação"
         ):
-
-            st.write(
-                "Se o Google não localizar algum ponto "
-                "pelo nome/endereço, tente a versão "
-                "por coordenadas."
-            )
-
 
             url_coordenadas = (
                 gerar_url_google_maps(
@@ -1668,10 +1991,6 @@ if calcular:
                 use_container_width=True,
             )
 
-
-    # ========================================================
-    # VÁRIOS TRECHOS
-    # ========================================================
 
     else:
 
@@ -1710,25 +2029,6 @@ if calcular:
                     )
 
 
-                # ============================================
-                # REFERÊNCIAS ENVIADAS AO GOOGLE
-                # ============================================
-
-                st.caption(
-                    "Referências enviadas ao Google Maps:"
-                )
-
-
-                for local in trecho:
-
-                    st.caption(
-                        "• "
-                        + montar_referencia_google(
-                            local
-                        )
-                    )
-
-
                 url_google = (
                     gerar_url_google_maps(
                         trecho
@@ -1747,7 +2047,6 @@ if calcular:
                 )
 
 
-                # Fallback
                 url_coord = (
                     gerar_url_google_maps(
                         trecho,
