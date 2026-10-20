@@ -262,7 +262,20 @@ def _request_with_retries(
 # HEADERS
 # ============================================================
 
-def _headers(api_key):
+def _headers(
+    api_key,
+    accept="application/json"
+):
+    """
+    Monta os headers das requisições.
+
+    accept:
+        application/json
+            -> Matrix, Pelias etc.
+
+        application/geo+json
+            -> Directions no formato GeoJSON
+    """
 
     if not api_key:
 
@@ -270,12 +283,17 @@ def _headers(api_key):
             "A chave da API não foi informada."
         )
 
-    return {
+    headers = {
         "Authorization": api_key,
-        "Accept": "application/json",
         "Content-Type": "application/json",
         "User-Agent": "otimizador-rotas/1.0",
     }
+
+    if accept:
+
+        headers["Accept"] = accept
+
+    return headers
 
 
 # ============================================================
@@ -650,18 +668,19 @@ def buscar_enderecos(
         )
 
 
-    response = _request_with_retries(
+response = _request_with_retries(
 
-        "GET",
+    "POST",
 
-        url,
+    url,
 
-        headers=_headers(
-            api_key
-        ),
+    headers=_headers(
+        api_key,
+        accept="application/geo+json"
+    ),
 
-        params=params,
-    )
+    json=payload,
+)
 
 
     try:
