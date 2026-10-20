@@ -1,15 +1,24 @@
 import streamlit as st
+import folium
 
 from streamlit_searchbox import st_searchbox
+from streamlit_folium import st_folium
 
 from ors import (
     autocomplete_enderecos,
+    obter_matriz_distancias,
+    obter_rota_completa,
     ORSError,
+)
+
+from route_engine import (
+    otimizar_rota,
+    RouteOptimizationError,
 )
 
 
 # ============================================================
-# CONFIGURAÇÃO DA PÁGINA
+# CONFIGURAÇÃO
 # ============================================================
 
 st.set_page_config(
@@ -23,12 +32,14 @@ st.set_page_config(
 # TÍTULO
 # ============================================================
 
-st.title("🗺️ Otimizador de Rotas")
+st.title(
+    "🗺️ Otimizador de Rotas"
+)
 
 st.write(
     "Informe o ponto inicial, o ponto final e as paradas. "
-    "Digite o nome do local ou endereço e selecione uma das "
-    "opções encontradas."
+    "Selecione os locais encontrados e o sistema calculará "
+    "a melhor ordem para percorrê-los."
 )
 
 
@@ -38,7 +49,11 @@ st.write(
 
 try:
 
-    ORS_KEY = st.secrets["ORS_KEY"]
+    ORS_KEY = (
+        st.secrets[
+            "ORS_KEY"
+        ]
+    )
 
     ors_configurado = True
 
@@ -55,7 +70,9 @@ except Exception:
 
 with st.sidebar:
 
-    st.header("Configuração")
+    st.header(
+        "Configuração"
+    )
 
     if ors_configurado:
 
@@ -72,9 +89,9 @@ with st.sidebar:
     st.divider()
 
     st.caption(
-        "Depois que o ponto inicial for escolhido, "
-        "as demais pesquisas darão preferência a "
-        "locais próximos dele."
+        "Após escolher o ponto inicial, "
+        "as outras pesquisas dão preferência "
+        "a locais próximos dele."
     )
 
 
@@ -93,25 +110,12 @@ if "erro_autocomplete" not in st.session_state:
 
 
 # ============================================================
-# BUSCA COM CACHE
-# ============================================================
-#
-# O usuário costuma digitar:
-#
-# h
-# ha
-# hav
-# hava
-# havan
-#
-# Sem cache, algumas consultas poderiam se repetir.
-#
-# O TTL de 5 minutos é suficiente para esse tipo de busca.
+# CACHE AUTOCOMPLETE
 # ============================================================
 
 @st.cache_data(
     ttl=300,
-    show_spinner=False
+    show_spinner=False,
 )
 def buscar_sugestoes_cache(
     texto,
@@ -130,7 +134,49 @@ def buscar_sugestoes_cache(
 
 
 # ============================================================
-# FUNÇÃO CHAMADA PELO AUTOCOMPLETE
+# CACHE MATRIX
+# ============================================================
+
+@st.cache_data(
+    ttl=3600,
+    show_spinner=False,
+)
+def obter_matrix_cache(
+    coordenadas,
+    _api_key,
+):
+
+    return obter_matriz_distancias(
+        coordenadas=list(
+            coordenadas
+        ),
+        api_key=_api_key,
+    )
+
+
+# ============================================================
+# CACHE DIRECTIONS
+# ============================================================
+
+@st.cache_data(
+    ttl=3600,
+    show_spinner=False,
+)
+def obter_directions_cache(
+    coordenadas,
+    _api_key,
+):
+
+    return obter_rota_completa(
+        coordenadas=list(
+            coordenadas
+        ),
+        api_key=_api_key,
+    )
+
+
+# ============================================================
+# AUTOCOMPLETE
 # ============================================================
 
 def buscar_sugestoes(
@@ -139,9 +185,10 @@ def buscar_sugestoes(
     focus_lon=None,
 ):
 
-    texto = searchterm.strip()
+    texto = (
+        searchterm.strip()
+    )
 
-    # Só pesquisa após 3 caracteres
     if len(texto) < 3:
 
         return []
@@ -152,62 +199,50 @@ def buscar_sugestoes(
 
     try:
 
-        resultados = buscar_sugestoes_cache(
-            texto,
-            focus_lat,
-            focus_lon,
-            ORS_KEY,
+        resultados = (
+            buscar_sugestoes_cache(
+                texto,
+                focus_lat,
+                focus_lon,
+                ORS_KEY,
+            )
         )
 
-        st.session_state.erro_autocomplete = None
+        st.session_state.erro_autocomplete = (
+            None
+        )
 
     except ORSError as e:
 
-        st.session_state.erro_autocomplete = str(e)
+        st.session_state.erro_autocomplete = (
+            str(e)
+        )
 
         return []
 
     except Exception:
 
         st.session_state.erro_autocomplete = (
-            "Não foi possível pesquisar o local neste momento."
+            "Não foi possível pesquisar "
+            "o local neste momento."
         )
 
         return []
 
-    # ========================================================
-    # FORMATO DO STREAMLIT-SEARCHBOX
-    # ========================================================
-    #
-    # Cada opção possui:
-    #
-    # (
-    #     "texto mostrado ao usuário",
-    #     objeto retornado após selecionar
-    # )
-    #
-    # Portanto, depois da seleção recebemos:
-    #
-    # {
-    #   "label": "...",
-    #   "latitude": ...,
-    #   "longitude": ...
-    # }
-    # ========================================================
-
     return [
-
         (
-            resultado["label"],
+            resultado[
+                "label"
+            ],
             resultado,
         )
-
-        for resultado in resultados
+        for resultado
+        in resultados
     ]
 
 
 # ============================================================
-# COMPONENTE DE BUSCA
+# CAMPO DE LOCAL
 # ============================================================
 
 def campo_local(
@@ -219,12 +254,16 @@ def campo_local(
 
     if focus:
 
-        focus_lat = focus.get(
-            "latitude"
+        focus_lat = (
+            focus.get(
+                "latitude"
+            )
         )
 
-        focus_lon = focus.get(
-            "longitude"
+        focus_lon = (
+            focus.get(
+                "longitude"
+            )
         )
 
     else:
@@ -232,7 +271,7 @@ def campo_local(
         focus_lat = None
         focus_lon = None
 
-    resultado = st_searchbox(
+    return st_searchbox(
 
         buscar_sugestoes,
 
@@ -242,70 +281,206 @@ def campo_local(
 
         placeholder=placeholder,
 
-        # Evita chamar a API a cada tecla imediatamente
         debounce=400,
 
-        # Depois de escolher, mantém o local no campo
         clear_on_submit=False,
 
-        # Permite editar novamente depois de selecionar
         edit_after_submit="option",
 
-        # Estes argumentos são repassados para
-        # buscar_sugestoes()
         focus_lat=focus_lat,
 
         focus_lon=focus_lon,
     )
 
-    return resultado
+
+# ============================================================
+# MAPA
+# ============================================================
+
+def criar_mapa(
+    geometry,
+    locais_ordenados,
+    rota_fechada,
+):
+
+    # ORS:
+    #
+    # geometry = [lon, lat]
+    #
+    # Folium:
+    #
+    # [lat, lon]
+
+    path = [
+        (
+            lat,
+            lon,
+        )
+        for lon, lat
+        in geometry
+    ]
+
+    if not path:
+
+        raise ValueError(
+            "A rota não possui geometria."
+        )
+
+    centro = [
+        sum(
+            p[0]
+            for p in path
+        ) / len(path),
+
+        sum(
+            p[1]
+            for p in path
+        ) / len(path),
+    ]
+
+    mapa = folium.Map(
+        location=centro,
+        zoom_start=13,
+        control_scale=True,
+    )
+
+    # ========================================================
+    # LINHA DA ROTA
+    # ========================================================
+
+    folium.PolyLine(
+        path,
+        weight=5,
+        opacity=0.8,
+    ).add_to(
+        mapa
+    )
+
+    # ========================================================
+    # NÃO DUPLICAR MARCADOR INÍCIO/FIM
+    # ========================================================
+
+    if rota_fechada:
+
+        locais_marcadores = (
+            locais_ordenados[:-1]
+        )
+
+    else:
+
+        locais_marcadores = (
+            locais_ordenados
+        )
+
+    # ========================================================
+    # MARCADORES
+    # ========================================================
+
+    for numero, local in enumerate(
+        locais_marcadores,
+        start=1,
+    ):
+
+        html = f"""
+        <div style="
+            background:#1e3a8a;
+            color:white;
+            border-radius:50%;
+            width:30px;
+            height:30px;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            font-size:12px;
+            font-weight:700;
+            border:2px solid white;
+            box-shadow:0 0 6px rgba(0,0,0,.4);
+        ">
+            {numero}
+        </div>
+        """
+
+        folium.Marker(
+            location=[
+                local["latitude"],
+                local["longitude"],
+            ],
+            tooltip=(
+                f"{numero}. "
+                f"{local['nome']}"
+            ),
+            popup=(
+                local[
+                    "nome"
+                ]
+            ),
+            icon=folium.DivIcon(
+                html=html
+            ),
+        ).add_to(
+            mapa
+        )
+
+    mapa.fit_bounds(
+        [
+            [
+                min(
+                    p[0]
+                    for p in path
+                ),
+                min(
+                    p[1]
+                    for p in path
+                ),
+            ],
+            [
+                max(
+                    p[0]
+                    for p in path
+                ),
+                max(
+                    p[1]
+                    for p in path
+                ),
+            ],
+        ]
+    )
+
+    return mapa
 
 
 # ============================================================
 # TIPO DA ROTA
 # ============================================================
-#
-# Colocamos esta opção antes dos endereços porque,
-# quando marcada, não precisamos pedir ponto final.
-# ============================================================
 
 voltar_inicio = st.checkbox(
     "🔄 Retornar ao ponto inicial",
     help=(
-        "Quando marcado, a rota começa e termina "
-        "no mesmo local."
+        "Quando marcado, a rota começa "
+        "e termina no mesmo local."
     ),
 )
 
 
 # ============================================================
-# INÍCIO E FIM
+# INÍCIO / FIM
 # ============================================================
 
-col_inicio, col_fim = st.columns(2)
+col_inicio, col_fim = (
+    st.columns(2)
+)
 
-
-# ============================================================
-# PONTO INICIAL
-# ============================================================
 
 with col_inicio:
 
     ponto_inicio = campo_local(
-
         chave="busca_ponto_inicio",
-
         label="📍 Ponto inicial",
-
         placeholder=(
             "Digite pelo menos 3 letras..."
         ),
     )
 
-
-# ============================================================
-# PONTO FINAL
-# ============================================================
 
 with col_fim:
 
@@ -315,7 +490,11 @@ with col_fim:
 
             st.text_input(
                 "🏁 Ponto final",
-                value=ponto_inicio["label"],
+                value=(
+                    ponto_inicio[
+                        "label"
+                    ]
+                ),
                 disabled=True,
             )
 
@@ -323,62 +502,49 @@ with col_fim:
 
             st.text_input(
                 "🏁 Ponto final",
-                value="Selecione primeiro o ponto inicial",
+                value=(
+                    "Selecione primeiro "
+                    "o ponto inicial"
+                ),
                 disabled=True,
             )
 
-        ponto_fim = ponto_inicio
+        ponto_fim = (
+            ponto_inicio
+        )
 
     else:
 
         ponto_fim = campo_local(
-
             chave="busca_ponto_fim",
-
             label="🏁 Ponto final",
-
             placeholder=(
                 "Digite pelo menos 3 letras..."
             ),
-
-            # =================================================
-            # IMPORTANTE
-            # =================================================
-            #
-            # Depois que o início é escolhido,
-            # damos preferência a resultados próximos dele.
-            #
-            # Exemplo:
-            #
-            # início = Brusque
-            #
-            # busca = Limeira
-            #
-            # resultados próximos de Brusque passam a
-            # ter preferência sobre Limeira/SP.
-            # =================================================
-
             focus=ponto_inicio,
         )
 
 
 # ============================================================
-# AVISO DO FOCO GEOGRÁFICO
+# FOCO
 # ============================================================
 
 if ponto_inicio:
 
     st.caption(
-        "📌 As demais buscas estão priorizando locais "
-        f"próximos de **{ponto_inicio['label']}**."
+        "📌 As demais buscas estão "
+        "priorizando locais próximos de "
+        f"**{ponto_inicio['label']}**."
     )
 
 
 # ============================================================
-# ERRO DE AUTOCOMPLETE
+# ERROS AUTOCOMPLETE
 # ============================================================
 
-if st.session_state.erro_autocomplete:
+if (
+    st.session_state.erro_autocomplete
+):
 
     st.warning(
         st.session_state.erro_autocomplete
@@ -386,7 +552,7 @@ if st.session_state.erro_autocomplete:
 
 
 # ============================================================
-# PARADAS INTERMEDIÁRIAS
+# PARADAS
 # ============================================================
 
 st.subheader(
@@ -394,12 +560,10 @@ st.subheader(
 )
 
 
-# ============================================================
-# BOTÕES
-# ============================================================
-
-col_adicionar, col_remover, _ = st.columns(
-    [1, 1, 4]
+col_adicionar, col_remover, _ = (
+    st.columns(
+        [1, 1, 4]
+    )
 )
 
 
@@ -418,13 +582,11 @@ with col_adicionar:
 with col_remover:
 
     if st.button(
-
         "➖ Remover parada",
-
         disabled=(
-            st.session_state.num_paradas <= 1
+            st.session_state.num_paradas
+            <= 1
         ),
-
         use_container_width=True,
     ):
 
@@ -432,10 +594,6 @@ with col_remover:
 
         st.rerun()
 
-
-# ============================================================
-# CAMPOS DAS PARADAS
-# ============================================================
 
 paradas = []
 
@@ -445,17 +603,12 @@ for i in range(
 ):
 
     parada = campo_local(
-
         chave=f"busca_parada_{i}",
-
         label=f"Parada {i + 1}",
-
         placeholder=(
-            "Digite um endereço ou estabelecimento..."
+            "Digite um endereço "
+            "ou estabelecimento..."
         ),
-
-        # Todas as paradas são priorizadas
-        # em relação ao ponto inicial
         focus=ponto_inicio,
     )
 
@@ -465,28 +618,25 @@ for i in range(
 
 
 # ============================================================
-# OPÇÕES DE OTIMIZAÇÃO
+# MODO
 # ============================================================
 
 st.divider()
 
 
-col_modo, col_info = st.columns(
-    [1, 1]
+col_modo, col_info = (
+    st.columns(2)
 )
 
 
 with col_modo:
 
     modo = st.radio(
-
         "Modo de otimização",
-
         [
             "Rápido",
             "Preciso",
         ],
-
         horizontal=True,
     )
 
@@ -496,70 +646,60 @@ with col_info:
     if modo == "Rápido":
 
         st.info(
-            "⚡ Prioriza velocidade de cálculo."
+            "⚡ Resultado otimizado em poucos segundos."
         )
 
     else:
 
         st.info(
-            "🎯 Busca uma solução ainda melhor, "
-            "mas pode levar mais tempo."
+            "🎯 Executa várias estratégias e "
+            "tenta comprovar a melhor rota. "
+            "Pode levar cerca de 1 minuto."
         )
 
 
 # ============================================================
-# BOTÃO CALCULAR
+# CALCULAR
 # ============================================================
 
 st.divider()
 
 
 calcular = st.button(
-
     "🚗 Calcular melhor rota",
-
     type="primary",
-
     use_container_width=True,
 )
 
 
 # ============================================================
-# PROCESSAMENTO
+# EXECUÇÃO
 # ============================================================
 
 if calcular:
 
     # ========================================================
-    # VERIFICA API
+    # VALIDAÇÃO
     # ========================================================
 
     if not ors_configurado:
 
         st.error(
-            "O OpenRouteService não está configurado."
+            "OpenRouteService não configurado."
         )
 
         st.stop()
 
-
-    # ========================================================
-    # INÍCIO PRECISA TER SIDO SELECIONADO
-    # ========================================================
 
     if not ponto_inicio:
 
         st.error(
-            "Selecione o ponto inicial em uma das "
-            "opções apresentadas pela busca."
+            "Selecione o ponto inicial "
+            "nas sugestões da busca."
         )
 
         st.stop()
 
-
-    # ========================================================
-    # FIM PRECISA TER SIDO SELECIONADO
-    # ========================================================
 
     if (
         not voltar_inicio
@@ -568,73 +708,66 @@ if calcular:
     ):
 
         st.error(
-            "Selecione o ponto final em uma das "
-            "opções apresentadas pela busca."
+            "Selecione o ponto final "
+            "nas sugestões da busca."
         )
 
         st.stop()
 
 
-    # ========================================================
-    # REMOVE PARADAS NÃO PREENCHIDAS
-    # ========================================================
-
     paradas_validas = [
-
         parada
-
         for parada in paradas
-
         if parada is not None
     ]
 
 
-    # ========================================================
-    # ROTA FECHADA SEM PARADAS
-    # ========================================================
-
     if (
         voltar_inicio
         and
-        len(paradas_validas) == 0
+        not paradas_validas
     ):
 
         st.error(
-            "Para uma rota que retorna ao ponto inicial, "
-            "adicione pelo menos uma parada."
+            "Adicione pelo menos uma parada."
         )
 
         st.stop()
 
 
     # ========================================================
-    # MONTA LISTA FINAL
+    # PONTOS DO SOLVER
+    # ========================================================
+    #
+    # IMPORTANTE:
+    #
+    # em uma rota fechada NÃO duplicamos o início aqui.
+    #
+    # O solver adicionará novamente o início ao final.
     # ========================================================
 
-    locais = []
-
-
-    # INÍCIO
-
-    locais.append(
+    locais = [
         {
-            "tipo": "Início",
-
             "nome":
-                ponto_inicio["label"],
+                ponto_inicio[
+                    "label"
+                ],
 
             "latitude":
-                ponto_inicio["latitude"],
+                ponto_inicio[
+                    "latitude"
+                ],
 
             "longitude":
-                ponto_inicio["longitude"],
+                ponto_inicio[
+                    "longitude"
+                ],
+
+            "tipo":
+                "Início",
         }
-    )
+    ]
 
-
-    # ========================================================
-    # PARADAS
-    # ========================================================
 
     for numero, parada in enumerate(
         paradas_validas,
@@ -643,83 +776,298 @@ if calcular:
 
         locais.append(
             {
-                "tipo":
-                    f"Parada {numero}",
-
                 "nome":
-                    parada["label"],
+                    parada[
+                        "label"
+                    ],
 
                 "latitude":
-                    parada["latitude"],
+                    parada[
+                        "latitude"
+                    ],
 
                 "longitude":
-                    parada["longitude"],
+                    parada[
+                        "longitude"
+                    ],
+
+                "tipo":
+                    f"Parada {numero}",
+            }
+        )
+
+
+    if not voltar_inicio:
+
+        locais.append(
+            {
+                "nome":
+                    ponto_fim[
+                        "label"
+                    ],
+
+                "latitude":
+                    ponto_fim[
+                        "latitude"
+                    ],
+
+                "longitude":
+                    ponto_fim[
+                        "longitude"
+                    ],
+
+                "tipo":
+                    "Fim",
             }
         )
 
 
     # ========================================================
-    # FIM
+    # DUPLICADOS
+    # ========================================================
+
+    coordenadas_unicas = set()
+
+    duplicados = []
+
+    for local in locais:
+
+        chave = (
+            round(
+                local[
+                    "latitude"
+                ],
+                6,
+            ),
+            round(
+                local[
+                    "longitude"
+                ],
+                6,
+            ),
+        )
+
+        if chave in coordenadas_unicas:
+
+            duplicados.append(
+                local[
+                    "nome"
+                ]
+            )
+
+        coordenadas_unicas.add(
+            chave
+        )
+
+
+    if duplicados:
+
+        st.error(
+            "O mesmo local foi selecionado "
+            "mais de uma vez."
+        )
+
+        st.stop()
+
+
+    # ========================================================
+    # LIMITES
     # ========================================================
 
     if voltar_inicio:
 
-        locais.append(
-            {
-                "tipo":
-                    "Fim",
-
-                "nome":
-                    ponto_inicio["label"],
-
-                "latitude":
-                    ponto_inicio["latitude"],
-
-                "longitude":
-                    ponto_inicio["longitude"],
-            }
-        )
+        max_locais = 49
 
     else:
 
-        locais.append(
-            {
-                "tipo":
-                    "Fim",
+        max_locais = 50
 
-                "nome":
-                    ponto_fim["label"],
 
-                "latitude":
-                    ponto_fim["latitude"],
+    if len(locais) > max_locais:
 
-                "longitude":
-                    ponto_fim["longitude"],
-            }
+        st.error(
+            f"Esta rota possui {len(locais)} locais. "
+            f"O limite atual é {max_locais}."
+        )
+
+        st.stop()
+
+
+    # ========================================================
+    # COORDENADAS
+    # ========================================================
+
+    coordenadas = tuple(
+        (
+            local[
+                "latitude"
+            ],
+            local[
+                "longitude"
+            ],
+        )
+        for local in locais
+    )
+
+
+    start_idx = 0
+
+
+    if voltar_inicio:
+
+        end_idx = 0
+
+    else:
+
+        end_idx = (
+            len(locais) - 1
         )
 
 
     # ========================================================
-    # GUARDA PARA O PRÓXIMO PASSO
-    # ========================================================
-    #
-    # Quando adicionarmos route_engine.py,
-    # serão estes dados que passaremos ao algoritmo.
+    # MATRIX
     # ========================================================
 
-    st.session_state[
-        "locais_confirmados"
-    ] = locais
+    try:
+
+        with st.spinner(
+            "Calculando distâncias entre os locais..."
+        ):
+
+            matrix = (
+                obter_matrix_cache(
+                    coordenadas,
+                    ORS_KEY,
+                )
+            )
 
 
-    st.session_state[
-        "modo_otimizacao"
-    ] = modo
+        # ====================================================
+        # OTIMIZAÇÃO
+        # ====================================================
+
+        with st.spinner(
+            "Procurando a melhor rota..."
+        ):
+
+            resultado = (
+                otimizar_rota(
+                    matrix_m=matrix,
+                    start_idx=start_idx,
+                    end_idx=end_idx,
+                    modo=modo,
+                )
+            )
 
 
-    st.session_state[
-        "rota_fechada"
-    ] = voltar_inicio
+        # ====================================================
+        # ORDEM DOS LOCAIS
+        # ====================================================
+
+        route = (
+            resultado[
+                "route"
+            ]
+        )
+
+
+        locais_ordenados = [
+            locais[i]
+            for i in route
+        ]
+
+
+        coordenadas_ordenadas = tuple(
+            (
+                local[
+                    "latitude"
+                ],
+                local[
+                    "longitude"
+                ],
+            )
+            for local
+            in locais_ordenados
+        )
+
+
+        # ====================================================
+        # DIRECTIONS
+        # ====================================================
+
+        with st.spinner(
+            "Montando a rota pelas ruas..."
+        ):
+
+            rota_real = (
+                obter_directions_cache(
+                    coordenadas_ordenadas,
+                    ORS_KEY,
+                )
+            )
+
+
+    except (
+        ORSError,
+        RouteOptimizationError,
+    ) as e:
+
+        st.error(
+            str(e)
+        )
+
+        st.stop()
+
+
+    except Exception as e:
+
+        st.error(
+            "Ocorreu um erro inesperado "
+            "ao calcular a rota."
+        )
+
+        st.exception(
+            e
+        )
+
+        st.stop()
+
+
+    # ========================================================
+    # RESULTADOS
+    # ========================================================
+
+    distancia_km = (
+        rota_real[
+            "distancia_m"
+        ]
+        / 1000
+    )
+
+
+    duracao_min = (
+        rota_real[
+            "duracao_s"
+        ]
+        / 60
+    )
+
+
+    minutos_total = round(
+        duracao_min
+    )
+
+
+    horas = (
+        minutos_total
+        // 60
+    )
+
+
+    minutos = (
+        minutos_total
+        % 60
+    )
 
 
     # ========================================================
@@ -727,16 +1075,7 @@ if calcular:
     # ========================================================
 
     st.success(
-        "Todos os locais foram selecionados corretamente."
-    )
-
-
-    # ========================================================
-    # RESUMO
-    # ========================================================
-
-    st.subheader(
-        "📍 Locais confirmados"
+        "Rota calculada com sucesso."
     )
 
 
@@ -744,102 +1083,154 @@ if calcular:
     # MÉTRICAS
     # ========================================================
 
-    col1, col2, col3 = st.columns(
-        3
+    col1, col2, col3 = (
+        st.columns(3)
     )
 
 
     with col1:
 
         st.metric(
-            "Locais",
-            len(
-                locais
-            )
-            - (
-                1
-                if voltar_inicio
-                else 0
-            )
+            "Distância total",
+            f"{distancia_km:.2f} km",
         )
 
 
     with col2:
 
-        st.metric(
-            "Paradas",
-            len(
-                paradas_validas
+        if horas:
+
+            tempo_texto = (
+                f"{horas}h "
+                f"{minutos:02d}min"
             )
+
+        else:
+
+            tempo_texto = (
+                f"{minutos} min"
+            )
+
+        st.metric(
+            "Tempo estimado",
+            tempo_texto,
         )
 
 
     with col3:
 
         st.metric(
-            "Modo",
-            modo,
+            "Locais",
+            len(locais),
         )
 
 
     # ========================================================
-    # MOSTRA CADA LOCAL
+    # STATUS DA OTIMIZAÇÃO
     # ========================================================
 
-    for local in locais:
+    if (
+        resultado[
+            "status"
+        ]
+        == "ÓTIMA COMPROVADA"
+    ):
 
-        # Na rota fechada não precisamos mostrar
-        # o mesmo início novamente como uma caixa final.
-        #
-        # Mas o dado permanece na lista para o algoritmo.
+        st.success(
+            "🏆 Rota ótima matematicamente comprovada."
+        )
 
-        if (
-            voltar_inicio
-            and
-            local is locais[-1]
-        ):
 
-            continue
+    elif (
+        resultado[
+            "gap_percent"
+        ]
+        is not None
+    ):
 
-        with st.container(
-            border=True
-        ):
+        st.info(
+            "🎯 Melhor rota encontrada. "
+            f"Gap máximo restante: "
+            f"{resultado['gap_percent']:.3f}%."
+        )
 
-            st.write(
-                f"**{local['tipo']}**"
-            )
 
-            st.write(
-                local[
-                    "nome"
-                ]
-            )
+    else:
 
-            st.caption(
-                f"📐 "
-                f"{local['latitude']:.6f}, "
-                f"{local['longitude']:.6f}"
-            )
+        st.info(
+            "⚡ Rota otimizada em modo rápido."
+        )
 
 
     # ========================================================
-    # ROTA FECHADA
+    # ORDEM
     # ========================================================
+
+    st.subheader(
+        "📋 Ordem da rota"
+    )
+
+
+    if voltar_inicio:
+
+        lista_exibir = (
+            locais_ordenados[:-1]
+        )
+
+    else:
+
+        lista_exibir = (
+            locais_ordenados
+        )
+
+
+    for numero, local in enumerate(
+        lista_exibir,
+        start=1,
+    ):
+
+        st.write(
+            f"**{numero}.** "
+            f"{local['nome']}"
+        )
+
 
     if voltar_inicio:
 
         st.write(
-            f"🔄 **Retorno:** "
-            f"{ponto_inicio['label']}"
+            f"**{len(lista_exibir) + 1}.** "
+            f"{locais_ordenados[-1]['nome']} "
+            f"_(retorno)_"
         )
 
 
     # ========================================================
-    # PRÓXIMA ETAPA
+    # MAPA
     # ========================================================
 
-    st.info(
-        "Os locais e suas coordenadas estão prontos. "
-        "O próximo passo é enviar esses pontos ao "
-        "algoritmo de otimização de rota."
+    st.subheader(
+        "🗺️ Mapa da rota"
+    )
+
+
+    mapa = criar_mapa(
+        geometry=(
+            rota_real[
+                "geometry"
+            ]
+        ),
+        locais_ordenados=(
+            locais_ordenados
+        ),
+        rota_fechada=(
+            voltar_inicio
+        ),
+    )
+
+
+    st_folium(
+        mapa,
+        height=600,
+        use_container_width=True,
+        returned_objects=[],
     )
