@@ -30,10 +30,6 @@ st.set_page_config(
 )
 
 
-# ============================================================
-# TÍTULO
-# ============================================================
-
 st.title(
     "🗺️ Otimizador de Rotas"
 )
@@ -50,17 +46,11 @@ st.write(
 # ============================================================
 
 try:
-
-    ORS_KEY = st.secrets[
-        "ORS_KEY"
-    ]
-
+    ORS_KEY = st.secrets["ORS_KEY"]
     ors_configurado = True
 
 except Exception:
-
     ORS_KEY = None
-
     ors_configurado = False
 
 
@@ -90,7 +80,7 @@ with st.sidebar:
 
     st.caption(
         "Depois que o ponto inicial for escolhido, "
-        "as outras pesquisas priorizam locais próximos dele."
+        "as demais pesquisas priorizam locais próximos dele."
     )
 
 
@@ -133,16 +123,17 @@ def buscar_sugestoes_cache(
 
 
 # ============================================================
-# CACHE MATRIX
+# CACHE MATRIX V2
 # ============================================================
 
 @st.cache_data(
     ttl=3600,
     show_spinner=False,
 )
-def obter_matrix_cache(
+def obter_matrix_cache_v2(
     coordenadas,
     _api_key,
+    cache_version="matrix-v2",
 ):
 
     return obter_matriz_distancias(
@@ -184,17 +175,14 @@ def buscar_sugestoes(
     focus_lon=None,
 ):
 
-    texto = (
-        searchterm.strip()
-    )
+    texto = searchterm.strip()
 
     if len(texto) < 3:
-
         return []
 
     if not ors_configurado:
-
         return []
+
 
     try:
 
@@ -207,9 +195,8 @@ def buscar_sugestoes(
             )
         )
 
-        st.session_state.erro_autocomplete = (
-            None
-        )
+        st.session_state.erro_autocomplete = None
+
 
     except ORSError as e:
 
@@ -218,6 +205,7 @@ def buscar_sugestoes(
         )
 
         return []
+
 
     except Exception:
 
@@ -230,16 +218,11 @@ def buscar_sugestoes(
 
 
     return [
-
         (
-            resultado[
-                "label"
-            ],
+            resultado["label"],
             resultado,
         )
-
-        for resultado
-        in resultados
+        for resultado in resultados
     ]
 
 
@@ -271,34 +254,24 @@ def campo_local(
     else:
 
         focus_lat = None
-
         focus_lon = None
 
 
     return st_searchbox(
-
         buscar_sugestoes,
-
         key=chave,
-
         label=label,
-
         placeholder=placeholder,
-
         debounce=400,
-
         clear_on_submit=False,
-
         edit_after_submit="option",
-
         focus_lat=focus_lat,
-
         focus_lon=focus_lon,
     )
 
 
 # ============================================================
-# CRIAÇÃO DO MAPA
+# MAPA
 # ============================================================
 
 def criar_mapa(
@@ -314,12 +287,10 @@ def criar_mapa(
     # [latitude, longitude]
 
     path = [
-
         (
             lat,
             lon,
         )
-
         for lon, lat
         in geometry
     ]
@@ -333,15 +304,14 @@ def criar_mapa(
 
 
     centro = [
-
         sum(
-            p[0]
-            for p in path
+            ponto[0]
+            for ponto in path
         ) / len(path),
 
         sum(
-            p[1]
-            for p in path
+            ponto[1]
+            for ponto in path
         ) / len(path),
     ]
 
@@ -353,10 +323,6 @@ def criar_mapa(
     )
 
 
-    # ========================================================
-    # LINHA DA ROTA
-    # ========================================================
-
     folium.PolyLine(
         path,
         weight=5,
@@ -365,10 +331,6 @@ def criar_mapa(
         mapa
     )
 
-
-    # ========================================================
-    # NÃO DUPLICA O INÍCIO EM ROTA FECHADA
-    # ========================================================
 
     if rota_fechada:
 
@@ -382,10 +344,6 @@ def criar_mapa(
             locais_ordenados
         )
 
-
-    # ========================================================
-    # MARCADORES
-    # ========================================================
 
     for numero, local in enumerate(
         locais_marcadores,
@@ -413,58 +371,43 @@ def criar_mapa(
 
 
         folium.Marker(
-
             location=[
-                local[
-                    "latitude"
-                ],
-                local[
-                    "longitude"
-                ],
+                local["latitude"],
+                local["longitude"],
             ],
-
             tooltip=(
                 f"{numero}. "
                 f"{local['nome']}"
             ),
-
-            popup=local[
-                "nome"
-            ],
-
+            popup=local["nome"],
             icon=folium.DivIcon(
                 html=html
             ),
-
         ).add_to(
             mapa
         )
 
 
-    # ========================================================
-    # ZOOM
-    # ========================================================
-
     mapa.fit_bounds(
         [
             [
                 min(
-                    p[0]
-                    for p in path
+                    ponto[0]
+                    for ponto in path
                 ),
                 min(
-                    p[1]
-                    for p in path
+                    ponto[1]
+                    for ponto in path
                 ),
             ],
             [
                 max(
-                    p[0]
-                    for p in path
+                    ponto[0]
+                    for ponto in path
                 ),
                 max(
-                    p[1]
-                    for p in path
+                    ponto[1]
+                    for ponto in path
                 ),
             ],
         ]
@@ -475,17 +418,167 @@ def criar_mapa(
 
 
 # ============================================================
-# GOOGLE MAPS
+# REFERÊNCIA PARA GOOGLE MAPS
+# ============================================================
+
+def montar_referencia_google(
+    local,
+):
+    """
+    Monta a melhor referência textual possível
+    para o Google Maps.
+
+    Em vez de enviar somente latitude/longitude,
+    enviamos nome + endereço + cidade + estado.
+
+    Isso permite que o próprio Google identifique
+    o estabelecimento/endereço em sua base.
+    """
+
+    nome = (
+        local.get("name")
+        or local.get("nome")
+    )
+
+    street = local.get(
+        "street"
+    )
+
+    housenumber = local.get(
+        "housenumber"
+    )
+
+    locality = local.get(
+        "locality"
+    )
+
+    region = local.get(
+        "region"
+    )
+
+    country = (
+        local.get("country")
+        or "Brazil"
+    )
+
+
+    componentes = []
+
+
+    # ========================================================
+    # NOME DO LOCAL
+    # ========================================================
+
+    if nome:
+
+        componentes.append(
+            str(nome).strip()
+        )
+
+
+    # ========================================================
+    # ENDEREÇO
+    # ========================================================
+
+    if street:
+
+        endereco = str(
+            street
+        ).strip()
+
+
+        if housenumber:
+
+            endereco += (
+                f", {housenumber}"
+            )
+
+
+        if endereco not in componentes:
+
+            componentes.append(
+                endereco
+            )
+
+
+    # ========================================================
+    # CIDADE
+    # ========================================================
+
+    if locality:
+
+        locality = str(
+            locality
+        ).strip()
+
+        if locality not in componentes:
+
+            componentes.append(
+                locality
+            )
+
+
+    # ========================================================
+    # ESTADO
+    # ========================================================
+
+    if region:
+
+        region = str(
+            region
+        ).strip()
+
+        if region not in componentes:
+
+            componentes.append(
+                region
+            )
+
+
+    # ========================================================
+    # PAÍS
+    # ========================================================
+
+    if country:
+
+        country = str(
+            country
+        ).strip()
+
+        if country not in componentes:
+
+            componentes.append(
+                country
+            )
+
+
+    referencia = ", ".join(
+        componentes
+    )
+
+
+    # ========================================================
+    # FALLBACK
+    # ========================================================
+
+    if not referencia:
+
+        referencia = local.get(
+            "nome",
+            ""
+        )
+
+
+    return referencia
+
+
+# ============================================================
+# REFERÊNCIA POR COORDENADA
 # ============================================================
 
 def coordenada_google_maps(
     local,
 ):
-    """
-    Converte um local para:
-
-    latitude,longitude
-    """
 
     return (
         f"{local['latitude']:.7f},"
@@ -494,43 +587,55 @@ def coordenada_google_maps(
 
 
 # ============================================================
-# GERA URL DO GOOGLE MAPS
+# URL PRINCIPAL DO GOOGLE MAPS
 # ============================================================
 
 def gerar_url_google_maps(
     locais_trecho,
+    usar_coordenadas=False,
 ):
     """
-    Gera uma URL universal do Google Maps.
+    Gera URL do Google Maps.
 
-    A ordem recebida é preservada:
+    Por padrão utiliza referências textuais completas.
 
-    primeiro ponto = origem
-
-    último ponto = destino
-
-    demais = waypoints
+    Se usar_coordenadas=True, utiliza lat/lon
+    como alternativa de fallback.
     """
 
-    if len(
-        locais_trecho
-    ) < 2:
+    if len(locais_trecho) < 2:
 
         return None
 
 
-    origem = (
-        coordenada_google_maps(
-            locais_trecho[0]
-        )
-    )
+    # ========================================================
+    # ESCOLHE REPRESENTAÇÃO
+    # ========================================================
+
+    if usar_coordenadas:
+
+        referencias = [
+            coordenada_google_maps(
+                local
+            )
+            for local
+            in locais_trecho
+        ]
+
+    else:
+
+        referencias = [
+            montar_referencia_google(
+                local
+            )
+            for local
+            in locais_trecho
+        ]
 
 
-    destino = (
-        coordenada_google_maps(
-            locais_trecho[-1]
-        )
-    )
+    origem = referencias[0]
+
+    destino = referencias[-1]
 
 
     params = {
@@ -546,26 +651,13 @@ def gerar_url_google_maps(
     # WAYPOINTS
     # ========================================================
 
-    if len(
-        locais_trecho
-    ) > 2:
-
-        waypoints = "|".join(
-
-            coordenada_google_maps(
-                local
-            )
-
-            for local
-            in locais_trecho[
-                1:-1
-            ]
-        )
-
+    if len(referencias) > 2:
 
         params[
             "waypoints"
-        ] = waypoints
+        ] = "|".join(
+            referencias[1:-1]
+        )
 
 
     return (
@@ -577,31 +669,18 @@ def gerar_url_google_maps(
 
 
 # ============================================================
-# DIVIDE ROTA EM TRECHOS
+# DIVIDE A ROTA PARA GOOGLE MAPS
 # ============================================================
 
 def dividir_rota_google_maps(
     locais_ordenados,
     max_pontos_por_trecho=5,
 ):
-    """
-    Divide a rota mantendo continuidade.
 
-    Exemplo:
-
-    Trecho 1:
-    1 2 3 4 5
-
-    Trecho 2:
-    5 6 7 8 9
-
-    O último ponto do trecho anterior
-    vira o primeiro do próximo.
-    """
-
-    if len(
-        locais_ordenados
-    ) <= max_pontos_por_trecho:
+    if (
+        len(locais_ordenados)
+        <= max_pontos_por_trecho
+    ):
 
         return [
             locais_ordenados
@@ -614,28 +693,21 @@ def dividir_rota_google_maps(
 
 
     while inicio < (
-        len(
-            locais_ordenados
-        ) - 1
+        len(locais_ordenados) - 1
     ):
 
         fim = min(
             inicio
             + max_pontos_por_trecho
             - 1,
-
-            len(
-                locais_ordenados
-            ) - 1,
+            len(locais_ordenados) - 1,
         )
 
 
-        trecho = (
-            locais_ordenados[
-                inicio:
-                fim + 1
-            ]
-        )
+        trecho = locais_ordenados[
+            inicio:
+            fim + 1
+        ]
 
 
         trechos.append(
@@ -643,8 +715,6 @@ def dividir_rota_google_maps(
         )
 
 
-        # O último ponto do trecho
-        # vira o início do próximo.
         inicio = fim
 
 
@@ -652,13 +722,11 @@ def dividir_rota_google_maps(
 
 
 # ============================================================
-# TIPO DA ROTA
+# ROTA FECHADA
 # ============================================================
 
 voltar_inicio = st.checkbox(
-
     "🔄 Retornar ao ponto inicial",
-
     help=(
         "Quando marcado, a rota começa "
         "e termina no mesmo local."
@@ -678,11 +746,8 @@ col_inicio, col_fim = (
 with col_inicio:
 
     ponto_inicio = campo_local(
-
         chave="busca_ponto_inicio",
-
         label="📍 Ponto inicial",
-
         placeholder=(
             "Digite pelo menos 3 letras..."
         ),
@@ -696,27 +761,23 @@ with col_fim:
         if ponto_inicio:
 
             st.text_input(
-
                 "🏁 Ponto final",
-
-                value=ponto_inicio[
-                    "label"
-                ],
-
+                value=(
+                    ponto_inicio[
+                        "label"
+                    ]
+                ),
                 disabled=True,
             )
 
         else:
 
             st.text_input(
-
                 "🏁 Ponto final",
-
                 value=(
                     "Selecione primeiro "
                     "o ponto inicial"
                 ),
-
                 disabled=True,
             )
 
@@ -729,21 +790,17 @@ with col_fim:
     else:
 
         ponto_fim = campo_local(
-
             chave="busca_ponto_fim",
-
             label="🏁 Ponto final",
-
             placeholder=(
                 "Digite pelo menos 3 letras..."
             ),
-
             focus=ponto_inicio,
         )
 
 
 # ============================================================
-# FOCO GEOGRÁFICO
+# FOCO
 # ============================================================
 
 if ponto_inicio:
@@ -756,12 +813,10 @@ if ponto_inicio:
 
 
 # ============================================================
-# ERRO AUTOCOMPLETE
+# ERRO DE AUTOCOMPLETE
 # ============================================================
 
-if (
-    st.session_state.erro_autocomplete
-):
+if st.session_state.erro_autocomplete:
 
     st.warning(
         st.session_state.erro_autocomplete
@@ -769,7 +824,7 @@ if (
 
 
 # ============================================================
-# PARADAS INTERMEDIÁRIAS
+# PARADAS
 # ============================================================
 
 st.subheader(
@@ -791,9 +846,7 @@ col_adicionar, col_remover, _ = (
 with col_adicionar:
 
     if st.button(
-
         "➕ Adicionar parada",
-
         use_container_width=True,
     ):
 
@@ -805,14 +858,11 @@ with col_adicionar:
 with col_remover:
 
     if st.button(
-
         "➖ Remover parada",
-
         disabled=(
             st.session_state.num_paradas
             <= 1
         ),
-
         use_container_width=True,
     ):
 
@@ -833,16 +883,12 @@ for i in range(
 ):
 
     parada = campo_local(
-
         chave=f"busca_parada_{i}",
-
         label=f"Parada {i + 1}",
-
         placeholder=(
             "Digite um endereço "
             "ou estabelecimento..."
         ),
-
         focus=ponto_inicio,
     )
 
@@ -869,75 +915,43 @@ col_objetivo, col_modo = (
 )
 
 
-# ============================================================
-# OBJETIVO
-# ============================================================
-
 with col_objetivo:
 
     objetivo = st.radio(
-
         "Otimizar por",
-
         [
             "Menor distância",
             "Menor tempo",
         ],
-
-        index=0,
-
         horizontal=True,
-
-        help=(
-            "Escolha se o algoritmo deve minimizar "
-            "a distância ou o tempo estimado."
-        ),
     )
 
-
-# ============================================================
-# MODO
-# ============================================================
 
 with col_modo:
 
     modo = st.radio(
-
         "Modo de otimização",
-
         [
             "Rápido",
             "Preciso",
         ],
-
-        index=0,
-
         horizontal=True,
-
-        help=(
-            "O modo Preciso executa mais estratégias "
-            "e pode levar mais tempo."
-        ),
     )
 
-
-# ============================================================
-# INFORMAÇÕES
-# ============================================================
 
 if objetivo == "Menor distância":
 
     st.info(
-        "📏 **Menor distância:** o algoritmo tentará "
-        "reduzir o total de quilômetros percorridos."
+        "📏 **Menor distância:** "
+        "o algoritmo minimizará os quilômetros percorridos."
     )
 
 else:
 
     st.info(
-        "⏱️ **Menor tempo:** o algoritmo tentará "
-        "reduzir o tempo estimado de deslocamento, "
-        "mesmo que percorra alguns quilômetros a mais."
+        "⏱️ **Menor tempo:** "
+        "o algoritmo minimizará o tempo estimado "
+        "de deslocamento."
     )
 
 
@@ -951,23 +965,20 @@ if modo == "Preciso":
 else:
 
     st.caption(
-        "⚡ O modo Rápido prioriza velocidade de cálculo."
+        "⚡ O modo Rápido prioriza velocidade."
     )
 
 
 # ============================================================
-# BOTÃO CALCULAR
+# CALCULAR
 # ============================================================
 
 st.divider()
 
 
 calcular = st.button(
-
     "🚗 Calcular melhor rota",
-
     type="primary",
-
     use_container_width=True,
 )
 
@@ -1016,12 +1027,9 @@ if calcular:
 
 
     paradas_validas = [
-
         parada
-
         for parada
         in paradas
-
         if parada is not None
     ]
 
@@ -1040,29 +1048,83 @@ if calcular:
 
 
     # ========================================================
-    # LOCAIS
+    # FUNÇÃO PARA PRESERVAR DADOS DO PELIAS
     # ========================================================
 
-    locais = [
-        {
+    def converter_local(
+        origem,
+        tipo,
+    ):
+
+        return {
             "nome":
-                ponto_inicio[
-                    "label"
-                ],
+                origem.get(
+                    "label",
+                    ""
+                ),
 
             "latitude":
-                ponto_inicio[
+                origem[
                     "latitude"
                 ],
 
             "longitude":
-                ponto_inicio[
+                origem[
                     "longitude"
                 ],
 
             "tipo":
-                "Início",
+                tipo,
+
+            # Dados preservados para melhorar
+            # a referência enviada ao Google Maps.
+
+            "name":
+                origem.get(
+                    "name"
+                ),
+
+            "street":
+                origem.get(
+                    "street"
+                ),
+
+            "housenumber":
+                origem.get(
+                    "housenumber"
+                ),
+
+            "locality":
+                origem.get(
+                    "locality"
+                ),
+
+            "region":
+                origem.get(
+                    "region"
+                ),
+
+            "country":
+                origem.get(
+                    "country"
+                ),
+
+            "layer":
+                origem.get(
+                    "layer"
+                ),
         }
+
+
+    # ========================================================
+    # LOCAIS
+    # ========================================================
+
+    locais = [
+        converter_local(
+            ponto_inicio,
+            "Início",
+        )
     ]
 
 
@@ -1076,54 +1138,24 @@ if calcular:
     ):
 
         locais.append(
-            {
-                "nome":
-                    parada[
-                        "label"
-                    ],
-
-                "latitude":
-                    parada[
-                        "latitude"
-                    ],
-
-                "longitude":
-                    parada[
-                        "longitude"
-                    ],
-
-                "tipo":
-                    f"Parada {numero}",
-            }
+            converter_local(
+                parada,
+                f"Parada {numero}",
+            )
         )
 
 
     # ========================================================
-    # PONTO FINAL
+    # DESTINO
     # ========================================================
 
     if not voltar_inicio:
 
         locais.append(
-            {
-                "nome":
-                    ponto_fim[
-                        "label"
-                    ],
-
-                "latitude":
-                    ponto_fim[
-                        "latitude"
-                    ],
-
-                "longitude":
-                    ponto_fim[
-                        "longitude"
-                    ],
-
-                "tipo":
-                    "Fim",
-            }
+            converter_local(
+                ponto_fim,
+                "Fim",
+            )
         )
 
 
@@ -1132,8 +1164,6 @@ if calcular:
     # ========================================================
 
     coordenadas_unicas = set()
-
-    duplicados = []
 
 
     for local in locais:
@@ -1157,11 +1187,12 @@ if calcular:
 
         if chave in coordenadas_unicas:
 
-            duplicados.append(
-                local[
-                    "nome"
-                ]
+            st.error(
+                "O mesmo local foi selecionado "
+                "mais de uma vez."
             )
+
+            st.stop()
 
 
         coordenadas_unicas.add(
@@ -1169,36 +1200,19 @@ if calcular:
         )
 
 
-    if duplicados:
-
-        st.error(
-            "O mesmo local foi selecionado "
-            "mais de uma vez."
-        )
-
-        st.stop()
-
-
     # ========================================================
-    # LIMITES
+    # LIMITE MATRIX
     # ========================================================
 
-    if voltar_inicio:
-
-        max_locais = 49
-
-    else:
-
-        max_locais = 50
-
-
-    if len(locais) > max_locais:
+    if (
+        len(locais)
+        * len(locais)
+        > 3500
+    ):
 
         st.error(
-            f"Esta rota possui "
-            f"{len(locais)} locais. "
-            f"O limite atual é "
-            f"{max_locais}."
+            "A quantidade de locais ultrapassa "
+            "o limite atual da Matrix API."
         )
 
         st.stop()
@@ -1209,7 +1223,6 @@ if calcular:
     # ========================================================
 
     coordenadas = tuple(
-
         (
             local[
                 "latitude"
@@ -1218,7 +1231,6 @@ if calcular:
                 "longitude"
             ],
         )
-
         for local
         in locais
     )
@@ -1239,7 +1251,7 @@ if calcular:
 
 
     # ========================================================
-    # CÁLCULO
+    # PROCESSAMENTO
     # ========================================================
 
     try:
@@ -1254,11 +1266,44 @@ if calcular:
         ):
 
             matrix_data = (
-                obter_matrix_cache(
+                obter_matrix_cache_v2(
                     coordenadas,
                     ORS_KEY,
                 )
             )
+
+
+        # ====================================================
+        # VALIDA MATRIX
+        # ====================================================
+
+        if not isinstance(
+            matrix_data,
+            dict,
+        ):
+
+            st.error(
+                "A Matrix API retornou "
+                "um formato incompatível."
+            )
+
+            st.stop()
+
+
+        if (
+            "distancias"
+            not in matrix_data
+            or
+            "duracoes"
+            not in matrix_data
+        ):
+
+            st.error(
+                "A Matrix API não retornou "
+                "distâncias e tempos."
+            )
+
+            st.stop()
 
 
         # ====================================================
@@ -1314,16 +1359,12 @@ if calcular:
 
 
         locais_ordenados = [
-
-            locais[i]
-
-            for i
-            in route
+            locais[indice]
+            for indice in route
         ]
 
 
         coordenadas_ordenadas = tuple(
-
             (
                 local[
                     "latitude"
@@ -1332,7 +1373,6 @@ if calcular:
                     "longitude"
                 ],
             )
-
             for local
             in locais_ordenados
         )
@@ -1381,7 +1421,7 @@ if calcular:
 
 
     # ========================================================
-    # DISTÂNCIA
+    # RESULTADOS
     # ========================================================
 
     distancia_km = (
@@ -1392,20 +1432,11 @@ if calcular:
     )
 
 
-    # ========================================================
-    # TEMPO
-    # ========================================================
-
-    duracao_min = (
+    minutos_total = round(
         rota_real[
             "duracao_s"
         ]
         / 60
-    )
-
-
-    minutos_total = round(
-        duracao_min
     )
 
 
@@ -1435,18 +1466,10 @@ if calcular:
         )
 
 
-    # ========================================================
-    # RESULTADO
-    # ========================================================
-
     st.success(
         "Rota calculada com sucesso."
     )
 
-
-    # ========================================================
-    # MÉTRICAS
-    # ========================================================
 
     col1, col2, col3, col4 = (
         st.columns(4)
@@ -1479,22 +1502,14 @@ if calcular:
 
     with col4:
 
-        if objetivo == "Menor distância":
-
-            objetivo_texto = (
-                "Distância"
-            )
-
-        else:
-
-            objetivo_texto = (
-                "Tempo"
-            )
-
-
         st.metric(
             "Otimizado por",
-            objetivo_texto,
+            (
+                "Distância"
+                if objetivo
+                == "Menor distância"
+                else "Tempo"
+            ),
         )
 
 
@@ -1504,7 +1519,7 @@ if calcular:
 
 
     # ========================================================
-    # STATUS SOLVER
+    # STATUS
     # ========================================================
 
     if (
@@ -1592,15 +1607,11 @@ if calcular:
 
 
     st.caption(
-        "A ordem dos locais foi calculada por este aplicativo. "
-        "O Google Maps será usado apenas para navegar "
-        "entre os pontos nessa sequência."
+        "O Google Maps recebe o nome e o endereço "
+        "dos locais selecionados, em vez de apenas "
+        "suas coordenadas."
     )
 
-
-    # ========================================================
-    # DIVISÃO CONSERVADORA PARA CELULAR
-    # ========================================================
 
     trechos_google = (
         dividir_rota_google_maps(
@@ -1611,12 +1622,10 @@ if calcular:
 
 
     # ========================================================
-    # UMA ÚNICA ROTA
+    # ROTA ÚNICA
     # ========================================================
 
-    if len(
-        trechos_google
-    ) == 1:
+    if len(trechos_google) == 1:
 
         url_google = (
             gerar_url_google_maps(
@@ -1632,6 +1641,34 @@ if calcular:
         )
 
 
+        # Fallback opcional
+
+        with st.expander(
+            "Opções avançadas de navegação"
+        ):
+
+            st.write(
+                "Se o Google não localizar algum ponto "
+                "pelo nome/endereço, tente a versão "
+                "por coordenadas."
+            )
+
+
+            url_coordenadas = (
+                gerar_url_google_maps(
+                    trechos_google[0],
+                    usar_coordenadas=True,
+                )
+            )
+
+
+            st.link_button(
+                "📍 Abrir usando coordenadas",
+                url_coordenadas,
+                use_container_width=True,
+            )
+
+
     # ========================================================
     # VÁRIOS TRECHOS
     # ========================================================
@@ -1641,7 +1678,7 @@ if calcular:
         st.info(
             f"A rota foi dividida em "
             f"{len(trechos_google)} trechos "
-            "para aumentar a compatibilidade "
+            "para melhorar a compatibilidade "
             "com o Google Maps no celular."
         )
 
@@ -1651,23 +1688,12 @@ if calcular:
             start=1,
         ):
 
-            origem_trecho = (
-                trecho[0][
-                    "nome"
-                ]
-            )
-
-            destino_trecho = (
-                trecho[-1][
-                    "nome"
-                ]
-            )
-
-
             with st.expander(
-                f"Trecho {numero_trecho}: "
-                f"{origem_trecho} → "
-                f"{destino_trecho}",
+                (
+                    f"Trecho {numero_trecho}: "
+                    f"{trecho[0]['nome']} → "
+                    f"{trecho[-1]['nome']}"
+                ),
                 expanded=(
                     numero_trecho == 1
                 ),
@@ -1684,6 +1710,25 @@ if calcular:
                     )
 
 
+                # ============================================
+                # REFERÊNCIAS ENVIADAS AO GOOGLE
+                # ============================================
+
+                st.caption(
+                    "Referências enviadas ao Google Maps:"
+                )
+
+
+                for local in trecho:
+
+                    st.caption(
+                        "• "
+                        + montar_referencia_google(
+                            local
+                        )
+                    )
+
+
                 url_google = (
                     gerar_url_google_maps(
                         trecho
@@ -1692,18 +1737,35 @@ if calcular:
 
 
                 st.link_button(
-                    f"🧭 Abrir trecho "
-                    f"{numero_trecho} "
-                    f"no Google Maps",
+                    (
+                        f"🧭 Abrir trecho "
+                        f"{numero_trecho} "
+                        f"no Google Maps"
+                    ),
                     url_google,
                     use_container_width=True,
                 )
 
 
+                # Fallback
+                url_coord = (
+                    gerar_url_google_maps(
+                        trecho,
+                        usar_coordenadas=True,
+                    )
+                )
+
+
+                st.link_button(
+                    "📍 Alternativa por coordenadas",
+                    url_coord,
+                    use_container_width=True,
+                )
+
+
         st.caption(
-            "O último local de cada trecho é repetido "
-            "como ponto inicial do trecho seguinte. "
-            "Isso mantém a continuidade da rota."
+            "O último local de cada trecho também é "
+            "o primeiro local do trecho seguinte."
         )
 
 
