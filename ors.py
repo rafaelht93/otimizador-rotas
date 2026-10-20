@@ -1,63 +1,48 @@
 import requests
 
 
-# ============================================================
-# ENDPOINTS
-# ============================================================
-
 PELIA_BASE_URL = "https://api.heigit.org/pelias/v1"
 
-
-# ============================================================
-# EXCEÇÃO PERSONALIZADA
-# ============================================================
 
 class ORSError(Exception):
     pass
 
 
-# ============================================================
-# GEOCODIFICAÇÃO
-# ============================================================
-
-def buscar_endereco(
+def autocomplete_enderecos(
     texto,
     api_key,
-    limite=5,
-    somente_brasil=True
+    limite=8,
+    focus_lat=None,
+    focus_lon=None
 ):
     """
-    Pesquisa um endereço/local pelo texto informado.
+    Retorna sugestões enquanto o usuário digita.
 
-    Retorna uma lista no formato:
-
-    [
-        {
-            "nome": "...",
-            "latitude": ...,
-            "longitude": ...
-        }
-    ]
+    Se focus_lat/focus_lon forem informados,
+    os resultados próximos recebem prioridade.
     """
 
     texto = texto.strip()
 
-    if not texto:
+    if len(texto) < 3:
         return []
 
-    url = f"{PELIA_BASE_URL}/search"
+    url = f"{PELIA_BASE_URL}/autocomplete"
 
     params = {
         "text": texto,
         "size": limite,
+        "boundary.country": "BR",
+        "layers": "address,venue,street,locality,neighbourhood"
     }
 
-    # Restringe os resultados ao Brasil.
-    # Isso melhora bastante pesquisas como:
-    # "Havan Brusque"
-    # "Rua João Bauer 100"
-    if somente_brasil:
-        params["boundary.country"] = "BR"
+    if (
+        focus_lat is not None
+        and
+        focus_lon is not None
+    ):
+        params["focus.point.lat"] = focus_lat
+        params["focus.point.lon"] = focus_lon
 
     headers = {
         "Authorization": api_key,
@@ -65,165 +50,80 @@ def buscar_endereco(
     }
 
     try:
-
         response = requests.get(
             url,
             params=params,
             headers=headers,
-            timeout=20
+            timeout=15
         )
 
     except requests.Timeout as e:
-
         raise ORSError(
-            "O serviço de localização demorou "
-            "demais para responder."
+            "O serviço de busca demorou demais para responder."
         ) from e
 
     except requests.RequestException as e:
-
         raise ORSError(
-            "Não foi possível conectar ao "
-            "serviço de localização."
+            "Não foi possível conectar ao serviço de busca."
         ) from e
 
-
-    # ========================================================
-    # ERROS HTTP
-    # ========================================================
-
     if response.status_code == 401:
-
         raise ORSError(
             "A chave do OpenRouteService não foi aceita."
         )
 
     if response.status_code == 403:
-
         raise ORSError(
-            "A chave do OpenRouteService não possui "
-            "acesso ao serviço de geocodificação."
+            "A chave não possui acesso ao serviço de geocodificação."
         )
 
     if response.status_code == 429:
-
         raise ORSError(
-            "O limite de consultas do OpenRouteService "
-            "foi atingido. Tente novamente mais tarde."
+            "Limite de consultas do OpenRouteService atingido."
         )
 
     if response.status_code >= 400:
-
         raise ORSError(
-            f"Erro do OpenRouteService "
-            f"(HTTP {response.status_code})."
+            f"Erro OpenRouteService HTTP {response.status_code}."
         )
 
-
-    # ========================================================
-    # JSON
-    # ========================================================
-
     try:
-
         data = response.json()
 
     except ValueError as e:
-
         raise ORSError(
-            "O serviço de localização retornou "
-            "uma resposta inválida."
+            "Resposta inválida do serviço de busca."
         ) from e
-
-
-    # ========================================================
-    # CONVERTE RESULTADOS
-    # ========================================================
 
     resultados = []
 
-    for feature in data.get(
-        "features",
-        []
-    ):
+    for feature in data.get("features", []):
 
-        try:
+        geometry = feature.get("geometry", {})
+        coordinates = geometry.get("coordinates")
 
-            longitude, latitude = (
-                feature[
-                    "geometry"
-                ][
-                    "coordinates"
-                ]
-            )
-
-        except (
-            KeyError,
-            ValueError,
-            TypeError
-        ):
+        if not coordinates or len(coordinates) < 2:
             continue
 
+        longitude, latitude = coordinates
 
-        properties = feature.get(
+        props = feature.get(
             "properties",
             {}
         )
 
-
-        # Pelias normalmente retorna um label bem completo.
-        nome = (
-            properties.get("label")
-            or
-            properties.get("name")
-            or
-            texto
+        label = (
+            props.get("label")
+            or props.get("name")
+            or texto
         )
-
 
         resultados.append(
             {
-                "nome": nome,
+                "label": label,
                 "latitude": float(latitude),
                 "longitude": float(longitude),
             }
         )
 
-
     return resultados
-
-
-# ============================================================
-# PEGAR MELHOR RESULTADO
-# ============================================================
-
-def geocodificar(
-    texto,
-    api_key,
-    somente_brasil=True
-):
-    """
-    Retorna o primeiro resultado encontrado.
-
-    Exemplo:
-
-    {
-        "nome": "Havan, Brusque, SC, Brasil",
-        "latitude": -27.09,
-        "longitude": -48.90
-    }
-
-    Retorna None caso não encontre nada.
-    """
-
-    resultados = buscar_endereco(
-        texto=texto,
-        api_key=api_key,
-        limite=1,
-        somente_brasil=somente_brasil
-    )
-
-    if not resultados:
-        return None
-
-    return resultados[0]
