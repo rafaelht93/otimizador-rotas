@@ -14,17 +14,12 @@ from ortools.sat.python import cp_model
 # CONFIGURAÇÕES
 # ============================================================
 
-# Modo rápido
 FAST_TIME_SECONDS = 5
 
-# Modo preciso:
-# três heurísticas com este tempo para cada uma
 PRECISE_HEURISTIC_TIME_SECONDS = 8
 
-# Tempo máximo do CP-SAT
 PRECISE_CP_SAT_TIME_SECONDS = 60
 
-# Evita ocupar CPUs demais no servidor público
 CPU_COUNT = max(
     1,
     min(
@@ -43,45 +38,48 @@ class RouteOptimizationError(Exception):
 
 
 # ============================================================
-# MATRIZ
+# PREPARA MATRIZ
 # ============================================================
 
-def _preparar_matriz(matrix_m):
+def _preparar_matriz(matrix):
 
     try:
         matrix = np.asarray(
-            matrix_m,
+            matrix,
             dtype=float,
         )
 
     except Exception as e:
         raise RouteOptimizationError(
-            "Não foi possível interpretar a matriz de distâncias."
+            "Não foi possível interpretar "
+            "a matriz de otimização."
         ) from e
 
     if (
         matrix.ndim != 2
-        or matrix.shape[0] != matrix.shape[1]
+        or
+        matrix.shape[0]
+        != matrix.shape[1]
     ):
         raise RouteOptimizationError(
-            "A matriz de distâncias precisa ser quadrada."
+            "A matriz precisa ser quadrada."
         )
 
     if not np.all(
         np.isfinite(matrix)
     ):
         raise RouteOptimizationError(
-            "A matriz possui trechos inválidos ou inacessíveis."
+            "A matriz possui trechos inválidos "
+            "ou inacessíveis."
         )
 
     if np.any(
         matrix < 0
     ):
         raise RouteOptimizationError(
-            "A matriz possui distâncias negativas."
+            "A matriz possui valores negativos."
         )
 
-    # OR-Tools trabalha melhor com inteiros
     return np.rint(
         matrix
     ).astype(
@@ -90,7 +88,7 @@ def _preparar_matriz(matrix_m):
 
 
 # ============================================================
-# CUSTO
+# CUSTO DA ROTA
 # ============================================================
 
 def _custo_rota(
@@ -102,7 +100,8 @@ def _custo_rota(
         int(
             matrix[i, j]
         )
-        for i, j in zip(
+        for i, j
+        in zip(
             route[:-1],
             route[1:],
         )
@@ -110,7 +109,7 @@ def _custo_rota(
 
 
 # ============================================================
-# ROUTING SOLVER
+# METAHEURÍSTICA
 # ============================================================
 
 def _executar_metaheuristica(
@@ -122,13 +121,12 @@ def _executar_metaheuristica(
     tempo,
 ):
 
-    n = len(
-        matrix
-    )
+    n = len(matrix)
 
     rota_fechada = (
         start_idx == end_idx
     )
+
 
     # ========================================================
     # MANAGER
@@ -155,17 +153,19 @@ def _executar_metaheuristica(
             )
         )
 
+
     routing = (
         pywrapcp.RoutingModel(
             manager
         )
     )
 
+
     # ========================================================
-    # DISTÂNCIA
+    # CALLBACK
     # ========================================================
 
-    def distance_callback(
+    def cost_callback(
         from_index,
         to_index,
     ):
@@ -189,15 +189,18 @@ def _executar_metaheuristica(
             ]
         )
 
+
     callback_index = (
         routing.RegisterTransitCallback(
-            distance_callback
+            cost_callback
         )
     )
+
 
     routing.SetArcCostEvaluatorOfAllVehicles(
         callback_index
     )
+
 
     # ========================================================
     # PARÂMETROS
@@ -225,8 +228,9 @@ def _executar_metaheuristica(
 
     params.log_search = False
 
+
     # ========================================================
-    # SOLVER
+    # SOLVE
     # ========================================================
 
     solution = (
@@ -235,8 +239,10 @@ def _executar_metaheuristica(
         )
     )
 
+
     if not solution:
         return None
+
 
     # ========================================================
     # RECONSTRUÇÃO
@@ -247,6 +253,7 @@ def _executar_metaheuristica(
     index = routing.Start(
         0
     )
+
 
     while not routing.IsEnd(
         index
@@ -264,23 +271,23 @@ def _executar_metaheuristica(
             )
         )
 
+
     route.append(
         manager.IndexToNode(
             index
         )
     )
 
-    custo_m = (
-        _custo_rota(
-            route,
-            matrix,
-        )
+
+    custo = _custo_rota(
+        route,
+        matrix,
     )
+
 
     return {
         "route": route,
-        "cost_m": custo_m,
-        "distance_km": custo_m / 1000,
+        "objective_cost": custo,
         "metodo": nome,
     }
 
@@ -310,18 +317,22 @@ def _modo_rapido(
         )
     )
 
+
     if resultado is None:
         raise RouteOptimizationError(
-            "Não foi possível encontrar uma rota válida."
+            "Não foi possível encontrar "
+            "uma rota válida."
         )
+
 
     resultado.update(
         {
             "status": "OTIMIZADA",
             "gap_percent": None,
-            "lower_bound_km": None,
+            "lower_bound": None,
         }
     )
+
 
     return resultado
 
@@ -357,7 +368,9 @@ def _melhor_heuristica_precisa(
         ),
     ]
 
+
     resultados = []
+
 
     for nome, estrategia in estrategias:
 
@@ -368,7 +381,9 @@ def _melhor_heuristica_precisa(
                 end_idx=end_idx,
                 metaheuristica=estrategia,
                 nome=nome,
-                tempo=PRECISE_HEURISTIC_TIME_SECONDS,
+                tempo=(
+                    PRECISE_HEURISTIC_TIME_SECONDS
+                ),
             )
         )
 
@@ -377,15 +392,19 @@ def _melhor_heuristica_precisa(
                 resultado
             )
 
-    if not resultados:
 
+    if not resultados:
         raise RouteOptimizationError(
-            "Nenhuma estratégia conseguiu encontrar uma rota."
+            "Nenhuma estratégia conseguiu "
+            "encontrar uma rota."
         )
+
 
     return min(
         resultados,
-        key=lambda x: x["cost_m"],
+        key=lambda x: x[
+            "objective_cost"
+        ],
     )
 
 
@@ -400,9 +419,7 @@ def _executar_cp_sat(
     resultado_inicial,
 ):
 
-    n = len(
-        matrix
-    )
+    n = len(matrix)
 
     rota_inicial = (
         resultado_inicial[
@@ -412,7 +429,7 @@ def _executar_cp_sat(
 
     custo_inicial = int(
         resultado_inicial[
-            "cost_m"
+            "objective_cost"
         ]
     )
 
@@ -420,17 +437,17 @@ def _executar_cp_sat(
         start_idx != end_idx
     )
 
+
     # ========================================================
     # MODELO
     # ========================================================
 
-    model = (
-        cp_model.CpModel()
-    )
+    model = cp_model.CpModel()
 
     arc_vars = {}
 
     arcs = []
+
 
     # ========================================================
     # ARCOS REAIS
@@ -443,12 +460,7 @@ def _executar_cp_sat(
             if i == j:
                 continue
 
-            # Em uma rota aberta:
-            #
-            # START -> ... -> END
-            #
-            # nenhum arco real pode entrar em START
-            # e nenhum arco real pode sair de END.
+
             if rota_aberta:
 
                 if j == start_idx:
@@ -456,6 +468,7 @@ def _executar_cp_sat(
 
                 if i == end_idx:
                     continue
+
 
             var = model.NewBoolVar(
                 f"x_{i}_{j}"
@@ -473,24 +486,13 @@ def _executar_cp_sat(
                 )
             )
 
+
     # ========================================================
-    # ROTA ABERTA
-    # ========================================================
-    #
-    # AddCircuit trabalha com ciclos.
-    #
-    # Transformamos:
-    #
-    # START -> ... -> END
-    #
-    # em:
-    #
-    # START -> ... -> END -> START
-    #
-    # O último arco é artificial e possui custo zero.
+    # ARCO ARTIFICIAL
     # ========================================================
 
     arco_artificial = None
+
 
     if rota_aberta:
 
@@ -512,6 +514,7 @@ def _executar_cp_sat(
             )
         )
 
+
     # ========================================================
     # CIRCUITO
     # ========================================================
@@ -519,6 +522,7 @@ def _executar_cp_sat(
     model.AddCircuit(
         arcs
     )
+
 
     # ========================================================
     # OBJETIVO
@@ -531,11 +535,11 @@ def _executar_cp_sat(
         for (
             i,
             j
-        ), var in arc_vars.items()
+        ), var
+        in arc_vars.items()
     )
 
-    # Já temos uma rota válida.
-    # Não há motivo para aceitar algo pior.
+
     model.Add(
         objective <= custo_inicial
     )
@@ -543,6 +547,7 @@ def _executar_cp_sat(
     model.Minimize(
         objective
     )
+
 
     # ========================================================
     # HINT
@@ -555,14 +560,18 @@ def _executar_cp_sat(
         )
     )
 
+
     for arco, var in arc_vars.items():
 
         model.AddHint(
             var,
-            1
-            if arco in arcos_iniciais
-            else 0,
+            (
+                1
+                if arco in arcos_iniciais
+                else 0
+            ),
         )
+
 
     if arco_artificial is not None:
 
@@ -571,13 +580,12 @@ def _executar_cp_sat(
             1,
         )
 
+
     # ========================================================
     # SOLVER
     # ========================================================
 
-    solver = (
-        cp_model.CpSolver()
-    )
+    solver = cp_model.CpSolver()
 
     solver.parameters.max_time_in_seconds = (
         PRECISE_CP_SAT_TIME_SECONDS
@@ -591,9 +599,11 @@ def _executar_cp_sat(
         False
     )
 
+
     status = solver.Solve(
         model
     )
+
 
     # ========================================================
     # FALLBACK
@@ -612,17 +622,19 @@ def _executar_cp_sat(
             {
                 "status": "MELHOR HEURÍSTICA",
                 "gap_percent": None,
-                "lower_bound_km": None,
+                "lower_bound": None,
             }
         )
 
         return resultado
+
 
     # ========================================================
     # ARCOS ESCOLHIDOS
     # ========================================================
 
     next_node = {}
+
 
     for (
         i,
@@ -635,6 +647,7 @@ def _executar_cp_sat(
 
             next_node[i] = j
 
+
     # ========================================================
     # ROTA ABERTA
     # ========================================================
@@ -645,40 +658,42 @@ def _executar_cp_sat(
             start_idx
         ]
 
-        atual = (
-            start_idx
-        )
+        atual = start_idx
+
 
         while atual != end_idx:
 
             if atual not in next_node:
                 raise RouteOptimizationError(
-                    "Erro ao reconstruir a rota otimizada."
+                    "Erro ao reconstruir "
+                    "a rota otimizada."
                 )
 
-            atual = (
-                next_node[
-                    atual
-                ]
-            )
+
+            atual = next_node[
+                atual
+            ]
 
             route.append(
                 atual
             )
+
 
             if len(route) > n:
                 raise RouteOptimizationError(
                     "Foi detectado um ciclo inesperado."
                 )
 
+
         if (
             len(route) != n
-            or
-            len(set(route)) != n
+            or len(set(route)) != n
         ):
             raise RouteOptimizationError(
-                "A rota otimizada não contém todos os pontos."
+                "A rota otimizada não contém "
+                "todos os pontos."
             )
+
 
     # ========================================================
     # ROTA FECHADA
@@ -690,74 +705,75 @@ def _executar_cp_sat(
             start_idx
         ]
 
-        atual = (
-            start_idx
-        )
+        atual = start_idx
+
 
         for _ in range(n):
 
             if atual not in next_node:
                 raise RouteOptimizationError(
-                    "Erro ao reconstruir o circuito."
+                    "Erro ao reconstruir "
+                    "o circuito."
                 )
 
-            atual = (
-                next_node[
-                    atual
-                ]
-            )
+
+            atual = next_node[
+                atual
+            ]
 
             route.append(
                 atual
             )
 
+
             if atual == start_idx:
                 break
+
 
         if (
             len(route) != n + 1
             or route[-1] != start_idx
-            or len(set(route[:-1])) != n
+            or len(
+                set(
+                    route[:-1]
+                )
+            ) != n
         ):
             raise RouteOptimizationError(
-                "O circuito não contém todos os pontos."
+                "O circuito não contém "
+                "todos os pontos."
             )
+
 
     # ========================================================
     # RESULTADOS
     # ========================================================
 
-    distancia_m = float(
+    custo = float(
         solver.ObjectiveValue()
     )
 
-    lower_bound_m = float(
+    lower_bound = float(
         solver.BestObjectiveBound()
     )
 
-    distancia_km = (
-        distancia_m / 1000
-    )
 
-    lower_bound_km = (
-        lower_bound_m / 1000
-    )
-
-    if distancia_m > 0:
+    if custo > 0:
 
         gap = max(
             0.0,
             (
-                distancia_m
-                - lower_bound_m
+                custo
+                - lower_bound
             )
-            / distancia_m
+            / custo
             * 100,
         )
 
     else:
 
         gap = 0.0
+
 
     if status == cp_model.OPTIMAL:
 
@@ -773,18 +789,14 @@ def _executar_cp_sat(
             "MELHOR ENCONTRADA"
         )
 
+
     return {
         "route": route,
-        "cost_m": int(
-            round(
-                distancia_m
-            )
-        ),
-        "distance_km": distancia_km,
+        "objective_cost": custo,
         "metodo": "CP-SAT",
         "status": status_text,
         "gap_percent": gap,
-        "lower_bound_km": lower_bound_km,
+        "lower_bound": lower_bound,
     }
 
 
@@ -799,41 +811,35 @@ def otimizar_rota(
     modo="Rápido",
 ):
 
-    matrix = (
-        _preparar_matriz(
-            matrix_m
-        )
+    matrix = _preparar_matriz(
+        matrix_m
     )
 
-    n = len(
-        matrix
-    )
+    n = len(matrix)
+
 
     if n < 2:
-
         raise RouteOptimizationError(
-            "São necessários pelo menos dois locais."
+            "São necessários pelo menos "
+            "dois locais."
         )
+
 
     if not (
         0 <= start_idx < n
     ):
-
         raise RouteOptimizationError(
             "Ponto inicial inválido."
         )
 
+
     if not (
         0 <= end_idx < n
     ):
-
         raise RouteOptimizationError(
             "Ponto final inválido."
         )
 
-    # ========================================================
-    # RÁPIDO
-    # ========================================================
 
     if modo.lower() == "rápido":
 
@@ -843,9 +849,6 @@ def otimizar_rota(
             end_idx,
         )
 
-    # ========================================================
-    # PRECISO
-    # ========================================================
 
     melhor = (
         _melhor_heuristica_precisa(
@@ -854,6 +857,7 @@ def otimizar_rota(
             end_idx,
         )
     )
+
 
     return _executar_cp_sat(
         matrix,
