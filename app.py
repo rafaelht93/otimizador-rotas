@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 import folium
 import pandas as pd
 import streamlit as st
+
 from streamlit_folium import st_folium
 from streamlit_searchbox import st_searchbox
 
@@ -24,7 +25,7 @@ from route_engine import (
 
 
 # ============================================================
-# PÁGINA
+# CONFIGURAÇÃO DA PÁGINA
 # ============================================================
 
 st.set_page_config(
@@ -33,11 +34,105 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("🗺️ Otimizador de Rotas")
+
+# ============================================================
+# LOGIN
+# ============================================================
+
+if not st.user.is_logged_in:
+
+    st.title("🗺️ Otimizador de Rotas")
+
+    st.write(
+        "Entre com sua conta Google para acessar "
+        "o Otimizador de Rotas."
+    )
+
+    st.write(
+        "Sua conta será usada para identificar suas rotas "
+        "e permitir que elas sejam salvas e recuperadas "
+        "posteriormente."
+    )
+
+    st.button(
+        "🔐 Entrar com Google",
+        on_click=st.login,
+        use_container_width=True,
+        type="primary",
+    )
+
+    st.stop()
+
+
+# ============================================================
+# DADOS DO USUÁRIO LOGADO
+# ============================================================
+
+dados_usuario = st.user.to_dict()
+
+usuario_id = dados_usuario.get(
+    "sub"
+)
+
+usuario_nome = (
+    dados_usuario.get("name")
+    or dados_usuario.get("given_name")
+    or dados_usuario.get("email")
+    or "Usuário"
+)
+
+usuario_email = (
+    dados_usuario.get("email")
+    or ""
+)
+
+usuario_foto = (
+    dados_usuario.get("picture")
+)
+
+
+# ============================================================
+# CABEÇALHO
+# ============================================================
+
+col_titulo, col_usuario, col_sair = st.columns(
+    [5, 2, 1]
+)
+
+
+with col_titulo:
+
+    st.title(
+        "🗺️ Otimizador de Rotas"
+    )
+
+
+with col_usuario:
+
+    st.write(
+        f"👤 **{usuario_nome}**"
+    )
+
+    if usuario_email:
+
+        st.caption(
+            usuario_email
+        )
+
+
+with col_sair:
+
+    st.button(
+        "Sair",
+        on_click=st.logout,
+        use_container_width=True,
+    )
+
 
 st.write(
-    "Informe os locais manualmente ou importe uma lista por CSV/Excel. "
-    "O sistema calculará a melhor sequência da rota."
+    "Informe os locais manualmente ou importe uma lista "
+    "por CSV/Excel. O sistema calculará a melhor sequência "
+    "da rota."
 )
 
 
@@ -46,11 +141,18 @@ st.write(
 # ============================================================
 
 try:
-    ORS_KEY = st.secrets["ORS_KEY"]
+
+    ORS_KEY = st.secrets[
+        "ORS_KEY"
+    ]
+
     ors_configurado = True
 
+
 except Exception:
+
     ORS_KEY = None
+
     ors_configurado = False
 
 
@@ -67,15 +169,17 @@ if not ors_configurado:
 # ============================================================
 
 if "num_paradas" not in st.session_state:
+
     st.session_state.num_paradas = 1
 
 
 if "erro_autocomplete" not in st.session_state:
+
     st.session_state.erro_autocomplete = None
 
 
 # ============================================================
-# CACHES
+# CACHE AUTOCOMPLETE
 # ============================================================
 
 @st.cache_data(
@@ -98,6 +202,10 @@ def buscar_sugestoes_cache(
     )
 
 
+# ============================================================
+# CACHE ENDEREÇOS IMPORTADOS
+# ============================================================
+
 @st.cache_data(
     ttl=3600,
     show_spinner=False,
@@ -115,6 +223,10 @@ def buscar_endereco_importado_cache(
         focus_lon=None,
     )
 
+
+# ============================================================
+# CACHE MATRIX
+# ============================================================
 
 @st.cache_data(
     ttl=3600,
@@ -134,6 +246,10 @@ def obter_matrix_cache_v2(
     )
 
 
+# ============================================================
+# CACHE DIRECTIONS
+# ============================================================
+
 @st.cache_data(
     ttl=3600,
     show_spinner=False,
@@ -152,7 +268,7 @@ def obter_directions_cache(
 
 
 # ============================================================
-# AUTOCOMPLETE MANUAL
+# AUTOCOMPLETE
 # ============================================================
 
 def buscar_sugestoes(
@@ -166,13 +282,14 @@ def buscar_sugestoes(
     ).strip()
 
 
-    if (
-        len(
-            texto
-        ) < 3
-        or
-        not ors_configurado
-    ):
+    if len(
+        texto
+    ) < 3:
+
+        return []
+
+
+    if not ors_configurado:
 
         return []
 
@@ -188,7 +305,6 @@ def buscar_sugestoes(
             )
         )
 
-
         st.session_state.erro_autocomplete = (
             None
         )
@@ -197,9 +313,7 @@ def buscar_sugestoes(
     except ORSError as e:
 
         st.session_state.erro_autocomplete = (
-            str(
-                e
-            )
+            str(e)
         )
 
         return []
@@ -222,14 +336,13 @@ def buscar_sugestoes(
             ],
             resultado,
         )
-
         for resultado
         in resultados
     ]
 
 
 # ============================================================
-# CAMPO DE BUSCA
+# CAMPO DE LOCAL
 # ============================================================
 
 def campo_local(
@@ -273,7 +386,7 @@ def campo_local(
 
 
 # ============================================================
-# CSV / EXCEL
+# NORMALIZAÇÃO
 # ============================================================
 
 def normalizar_texto(
@@ -290,15 +403,17 @@ def normalizar_texto(
 
     return "".join(
         caractere
-
         for caractere
         in texto
-
         if not unicodedata.combining(
             caractere
         )
     )
 
+
+# ============================================================
+# LOCALIZA COLUNA ENDEREÇO
+# ============================================================
 
 def localizar_coluna_endereco(
     dataframe,
@@ -319,6 +434,10 @@ def localizar_coluna_endereco(
     return None
 
 
+# ============================================================
+# DECODIFICA CSV
+# ============================================================
+
 def decodificar_csv(
     bytes_arquivo,
 ):
@@ -329,12 +448,17 @@ def decodificar_csv(
             "utf-8-sig"
         )
 
+
     except UnicodeDecodeError:
 
         return bytes_arquivo.decode(
             "latin1"
         )
 
+
+# ============================================================
+# LIMPA LINHA CSV
+# ============================================================
 
 def limpar_linha_csv_simples(
     linha,
@@ -344,9 +468,7 @@ def limpar_linha_csv_simples(
 
 
     if (
-        len(
-            valor
-        ) >= 2
+        len(valor) >= 2
         and
         (
             (
@@ -371,37 +493,36 @@ def limpar_linha_csv_simples(
         )
     ):
 
-        valor = (
-            valor[
-                1:-1
-            ]
-            .replace(
-                '""',
-                '"',
-            )
+        valor = valor[
+            1:-1
+        ]
+
+        valor = valor.replace(
+            '""',
+            '"',
         )
 
 
     return valor.strip()
 
 
+# ============================================================
+# LEITOR CSV
+# ============================================================
+
 def ler_csv_robusto(
     bytes_arquivo,
 ):
 
-    texto = (
-        decodificar_csv(
-            bytes_arquivo
-        )
+    texto = decodificar_csv(
+        bytes_arquivo
     )
 
 
     linhas = [
         linha
-
         for linha
         in texto.splitlines()
-
         if linha.strip()
     ]
 
@@ -413,48 +534,41 @@ def ler_csv_robusto(
         )
 
 
-    cabecalho = (
-        normalizar_texto(
-            linhas[
-                0
-            ]
-            .strip()
-            .strip(
-                '"'
-            )
-            .strip(
-                "'"
-            )
-        )
+    cabecalho = normalizar_texto(
+        linhas[
+            0
+        ]
+        .strip()
+        .strip('"')
+        .strip("'")
     )
 
 
     # ========================================================
-    # CSV DE UMA COLUNA
+    # CSV COM UMA COLUNA
     # ========================================================
 
     if cabecalho == "endereco":
 
-        enderecos = [
-            limpar_linha_csv_simples(
-                linha
+        enderecos = []
+
+
+        for linha in linhas[
+            1:
+        ]:
+
+            endereco = (
+                limpar_linha_csv_simples(
+                    linha
+                )
             )
 
-            for linha
-            in linhas[
-                1:
-            ]
-        ]
 
+            if endereco:
 
-        enderecos = [
-            endereco
-
-            for endereco
-            in enderecos
-
-            if endereco
-        ]
+                enderecos.append(
+                    endereco
+                )
 
 
         return pd.DataFrame(
@@ -466,7 +580,7 @@ def ler_csv_robusto(
 
 
     # ========================================================
-    # CSV COM VÁRIAS COLUNAS
+    # CSV COM MÚLTIPLAS COLUNAS
     # ========================================================
 
     for separador in (
@@ -483,6 +597,7 @@ def ler_csv_robusto(
                 ),
                 sep=separador,
             )
+
 
         except Exception:
 
@@ -505,6 +620,10 @@ def ler_csv_robusto(
     )
 
 
+# ============================================================
+# LEITURA CSV / EXCEL
+# ============================================================
+
 def ler_arquivo_paradas(
     arquivo,
 ):
@@ -512,7 +631,6 @@ def ler_arquivo_paradas(
     bytes_arquivo = (
         arquivo.getvalue()
     )
-
 
     nome = (
         arquivo.name.lower()
@@ -624,7 +742,7 @@ def ler_arquivo_paradas(
 
 
 # ============================================================
-# LOCAL
+# CONVERTE LOCAL
 # ============================================================
 
 def converter_local(
@@ -691,7 +809,7 @@ def converter_local(
 
 
 # ============================================================
-# MAPA
+# CRIA MAPA
 # ============================================================
 
 def criar_mapa(
@@ -703,18 +821,11 @@ def criar_mapa(
     objetivo,
 ):
 
-    # ORS:
-    # longitude, latitude
-    #
-    # Folium:
-    # latitude, longitude
-
     path = [
         (
             lat,
             lon,
         )
-
         for lon, lat
         in geometry
     ]
@@ -733,7 +844,6 @@ def criar_mapa(
             ponto[
                 0
             ]
-
             for ponto
             in path
         )
@@ -745,7 +855,6 @@ def criar_mapa(
             ponto[
                 1
             ]
-
             for ponto
             in path
         )
@@ -787,22 +896,16 @@ def criar_mapa(
         )
 
 
-    # ========================================================
-    # MARCADORES
-    # ========================================================
-
     for numero, local in enumerate(
         locais_marcadores,
         start=1,
     ):
 
-        nome = (
-            html.escape(
-                str(
-                    local[
-                        "nome"
-                    ]
-                )
+        nome = html.escape(
+            str(
+                local[
+                    "nome"
+                ]
             )
         )
 
@@ -864,7 +967,6 @@ def criar_mapa(
                     ponto[
                         0
                     ]
-
                     for ponto
                     in path
                 ),
@@ -873,7 +975,6 @@ def criar_mapa(
                     ponto[
                         1
                     ]
-
                     for ponto
                     in path
                 ),
@@ -883,7 +984,6 @@ def criar_mapa(
                     ponto[
                         0
                     ]
-
                     for ponto
                     in path
                 ),
@@ -892,7 +992,6 @@ def criar_mapa(
                     ponto[
                         1
                     ]
-
                     for ponto
                     in path
                 ),
@@ -901,16 +1000,10 @@ def criar_mapa(
     )
 
 
-    # ========================================================
-    # PAINEL DO MAPA
-    # ========================================================
-
     objetivo_texto = (
         "Distância"
-
         if objetivo
         == "Menor distância"
-
         else "Tempo"
     )
 
@@ -950,7 +1043,7 @@ def criar_mapa(
 
 
 # ============================================================
-# EXPORTA MAPA HTML
+# HTML DO MAPA
 # ============================================================
 
 def gerar_html_mapa(
@@ -993,21 +1086,17 @@ def montar_referencia_google(
         "street"
     )
 
-
     housenumber = local.get(
         "housenumber"
     )
-
 
     locality = local.get(
         "locality"
     )
 
-
     region = local.get(
         "region"
     )
-
 
     country = (
         local.get(
@@ -1080,6 +1169,10 @@ def montar_referencia_google(
     )
 
 
+# ============================================================
+# COORDENADA GOOGLE
+# ============================================================
+
 def coordenada_google_maps(
     local,
 ):
@@ -1089,6 +1182,10 @@ def coordenada_google_maps(
         f"{local['longitude']:.7f}"
     )
 
+
+# ============================================================
+# URL GOOGLE MAPS
+# ============================================================
 
 def gerar_url_google_maps(
     locais_trecho,
@@ -1108,7 +1205,6 @@ def gerar_url_google_maps(
             coordenada_google_maps(
                 local
             )
-
             for local
             in locais_trecho
         ]
@@ -1120,7 +1216,6 @@ def gerar_url_google_maps(
             montar_referencia_google(
                 local
             )
-
             for local
             in locais_trecho
         ]
@@ -1169,6 +1264,10 @@ def gerar_url_google_maps(
         )
     )
 
+
+# ============================================================
+# DIVIDE ROTA GOOGLE
+# ============================================================
 
 def dividir_rota_google_maps(
     locais_ordenados,
@@ -1224,7 +1323,7 @@ def dividir_rota_google_maps(
 
 
 # ============================================================
-# EXPORTAÇÃO CSV / EXCEL
+# DATAFRAME DA ROTA
 # ============================================================
 
 def dataframe_rota_otimizada(
@@ -1274,7 +1373,6 @@ def dataframe_rota_otimizada(
 
         linhas.append(
             {
-
                 "ordem":
                     ordem,
 
@@ -1304,6 +1402,10 @@ def dataframe_rota_otimizada(
     )
 
 
+# ============================================================
+# CSV
+# ============================================================
+
 def gerar_csv_rota(
     dataframe,
 ):
@@ -1313,13 +1415,16 @@ def gerar_csv_rota(
         .to_csv(
             index=False,
             sep=";",
-            encoding="utf-8-sig",
         )
         .encode(
             "utf-8-sig"
         )
     )
 
+
+# ============================================================
+# EXCEL
+# ============================================================
 
 def gerar_excel_rota(
     dataframe,
@@ -1336,7 +1441,6 @@ def gerar_excel_rota(
     resumo = pd.DataFrame(
         [
             {
-
                 "Distância total (km)":
                     round(
                         distancia_km,
@@ -1349,10 +1453,8 @@ def gerar_excel_rota(
                 "Otimizado por":
                     (
                         "Distância"
-
                         if objetivo
                         == "Menor distância"
-
                         else "Tempo"
                     ),
 
@@ -1362,13 +1464,11 @@ def gerar_excel_rota(
                 "Tipo de rota":
                     (
                         "Fechada"
-
                         if voltar_inicio
-
                         else "Aberta"
                     ),
 
-                "Quantidade de pontos na sequência":
+                "Quantidade de pontos":
                     len(
                         dataframe
                     ),
@@ -1405,7 +1505,7 @@ def gerar_excel_rota(
 
 
 # ============================================================
-# ENTRADA DOS LOCAIS
+# ENTRADA
 # ============================================================
 
 st.subheader(
@@ -1427,9 +1527,13 @@ modo_entrada = st.radio(
 
 
 ponto_inicio = None
+
 ponto_fim = None
+
 paradas = []
+
 voltar_inicio = False
+
 importacao_pronta = False
 
 
@@ -1445,10 +1549,8 @@ if modo_entrada == "Digitar manualmente":
     )
 
 
-    col_inicio, col_fim = (
-        st.columns(
-            2
-        )
+    col_inicio, col_fim = st.columns(
+        2
     )
 
 
@@ -1476,9 +1578,7 @@ if modo_entrada == "Digitar manualmente":
                     ponto_inicio[
                         "label"
                     ]
-
                     if ponto_inicio
-
                     else
                     "Selecione primeiro "
                     "o ponto inicial"
@@ -1638,9 +1738,7 @@ else:
         except Exception as e:
 
             st.error(
-                str(
-                    e
-                )
+                str(e)
             )
 
             st.stop()
@@ -1687,6 +1785,7 @@ else:
                         )
                     )
 
+
                 except Exception:
 
                     candidatos = []
@@ -1713,17 +1812,14 @@ else:
         if nao_encontrados:
 
             st.error(
-
                 "Não foi possível localizar "
                 "automaticamente os itens: "
-
                 + ", ".join(
                     map(
                         str,
                         nao_encontrados,
                     )
                 )
-
                 + "."
             )
 
@@ -2014,10 +2110,8 @@ st.subheader(
 )
 
 
-col_objetivo, col_modo = (
-    st.columns(
-        2
-    )
+col_objetivo, col_modo = st.columns(
+    2
 )
 
 
@@ -2067,19 +2161,19 @@ else:
     )
 
 
-st.caption(
+if modo == "Preciso":
 
-    (
+    st.caption(
         "🎯 O modo Preciso executa várias estratégias "
         "e tenta melhorar ou comprovar a solução."
     )
 
-    if modo == "Preciso"
 
-    else
+else:
 
-    "⚡ O modo Rápido prioriza velocidade."
-)
+    st.caption(
+        "⚡ O modo Rápido prioriza velocidade."
+    )
 
 
 # ============================================================
@@ -2195,7 +2289,6 @@ if calcular:
     ):
 
         locais.append(
-
             converter_local(
                 parada,
                 f"Parada {numero}",
@@ -2206,7 +2299,6 @@ if calcular:
     if not voltar_inicio:
 
         locais.append(
-
             converter_local(
                 ponto_fim,
                 "Fim",
@@ -2315,13 +2407,9 @@ if calcular:
 
 
     end_idx = (
-
         0
-
         if voltar_inicio
-
         else
-
         len(
             locais
         ) - 1
@@ -2376,16 +2464,12 @@ if calcular:
 
 
         matrix_otimizacao = (
-
             matrix_data[
                 "distancias"
             ]
-
             if objetivo
             == "Menor distância"
-
             else
-
             matrix_data[
                 "duracoes"
             ]
@@ -2452,9 +2536,7 @@ if calcular:
     ) as e:
 
         st.error(
-            str(
-                e
-            )
+            str(e)
         )
 
         st.stop()
@@ -2501,14 +2583,10 @@ if calcular:
 
 
     tempo_texto = (
-
         f"{horas}h "
         f"{minutos:02d}min"
-
         if horas
-
         else
-
         f"{minutos} min"
     )
 
@@ -2554,16 +2632,13 @@ if calcular:
     with col4:
 
         st.metric(
-
             "Otimizado por",
-
             (
                 "Distância"
-
                 if objetivo
                 == "Menor distância"
-
-                else "Tempo"
+                else
+                "Tempo"
             ),
         )
 
@@ -2614,7 +2689,7 @@ if calcular:
 
 
     # ========================================================
-    # ORDEM
+    # ORDEM DA ROTA
     # ========================================================
 
     st.subheader(
@@ -2623,15 +2698,11 @@ if calcular:
 
 
     lista_exibir = (
-
         locais_ordenados[
             :-1
         ]
-
         if voltar_inicio
-
         else
-
         locais_ordenados
     )
 
@@ -2657,7 +2728,7 @@ if calcular:
 
 
     # ========================================================
-    # CRIA MAPA UMA ÚNICA VEZ
+    # MAPA
     # ========================================================
 
     mapa = criar_mapa(
@@ -2814,10 +2885,9 @@ if calcular:
 
 
     st.caption(
-        "O mapa é exportado em HTML interativo e mantém "
-        "a rota, os marcadores numerados, zoom e o resumo "
-        "da viagem. Para carregar o mapa-base, o navegador "
-        "precisa de internet."
+        "O mapa é exportado em HTML interativo "
+        "com a rota, marcadores numerados, zoom "
+        "e resumo da viagem."
     )
 
 
@@ -2845,10 +2915,6 @@ if calcular:
         )
     )
 
-
-    # ========================================================
-    # UM TRECHO
-    # ========================================================
 
     if len(
         trechos_google
@@ -2889,10 +2955,6 @@ if calcular:
             )
 
 
-    # ========================================================
-    # VÁRIOS TRECHOS
-    # ========================================================
-
     else:
 
         st.info(
@@ -2915,8 +2977,7 @@ if calcular:
                 ),
 
                 expanded=(
-                    numero_trecho
-                    == 1
+                    numero_trecho == 1
                 ),
             ):
 
