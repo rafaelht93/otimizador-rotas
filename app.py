@@ -237,6 +237,16 @@ init_state(
     0,
 )
 
+init_state(
+    "local_endereco_editando_id",
+    None,
+)
+
+init_state(
+    "local_endereco_edit_version",
+    0,
+)
+
 
 # ============================================================
 # CONTROLE DE ESTADO
@@ -2563,7 +2573,7 @@ def calcular_rota_a_partir_de_locais(
 
     return {
         "versao":
-            4,
+            5,
 
         "voltar_inicio":
             bool(
@@ -3887,7 +3897,7 @@ def renderizar_resultado_rota(
 
 
     # ========================================================
-    # SALVAR
+    # SALVAR ROTA
     # ========================================================
 
     st.subheader(
@@ -4796,126 +4806,6 @@ def renderizar_locais_salvos():
         )
 
 
-    versao = (
-        st.session_state.local_form_version
-    )
-
-
-    # ========================================================
-    # NOVO LOCAL
-    # ========================================================
-
-    with st.expander(
-        "➕ Cadastrar novo local",
-        expanded=False,
-    ):
-
-        nome_novo = st.text_input(
-            "Nome do cliente/local",
-            placeholder=(
-                "Ex.: Cliente João / Loja Centro / Depósito"
-            ),
-            key=(
-                f"novo_local_nome_"
-                f"{versao}"
-            ),
-        )
-
-
-        endereco_novo = campo_local(
-            chave=(
-                f"novo_local_endereco_"
-                f"{versao}"
-            ),
-            label="Endereço",
-            placeholder=(
-                "Digite pelo menos 3 letras..."
-            ),
-        )
-
-
-        observacao_nova = st.text_area(
-            "Observação",
-            placeholder=(
-                "Ex.: Entregar na portaria / "
-                "ligar antes / recebe até 16h"
-            ),
-            key=(
-                f"novo_local_obs_"
-                f"{versao}"
-            ),
-        )
-
-
-        if endereco_novo:
-
-            st.caption(
-                "📌 Endereço selecionado: "
-                f"{endereco_novo['label']}"
-            )
-
-
-        if st.button(
-            "💾 Salvar local",
-            type="primary",
-            use_container_width=True,
-            key=(
-                f"salvar_novo_local_"
-                f"{versao}"
-            ),
-        ):
-
-            try:
-
-                nome_final = (
-                    nome_novo.strip()
-                    or
-                    nome_padrao_local(
-                        endereco_novo
-                        or
-                        {}
-                    )
-                )
-
-
-                registro = salvar_local_banco(
-                    nome_final,
-                    endereco_novo,
-                    observacao_nova,
-                )
-
-
-                st.session_state.local_form_version += 1
-
-
-                st.session_state.mensagem_sistema = {
-                    "tipo":
-                        "success",
-
-                    "texto":
-                        (
-                            f"Local "
-                            f"'{registro['nome']}' "
-                            f"salvo com sucesso."
-                        ),
-                }
-
-
-                st.rerun()
-
-
-            except Exception as e:
-
-                st.error(
-                    "Não foi possível salvar "
-                    f"o local: {e}"
-                )
-
-
-    # ========================================================
-    # LISTAGEM
-    # ========================================================
-
     try:
 
         locais = (
@@ -4933,6 +4823,319 @@ def renderizar_locais_salvos():
         return
 
 
+    # ========================================================
+    # ALTERAÇÃO DE ENDEREÇO
+    # ========================================================
+
+    local_endereco_id = (
+        st.session_state.local_endereco_editando_id
+    )
+
+
+    local_endereco = None
+
+
+    if local_endereco_id:
+
+        for item in locais:
+
+            if (
+                item.get(
+                    "id"
+                )
+                == local_endereco_id
+            ):
+
+                local_endereco = item
+
+                break
+
+
+        if local_endereco is None:
+
+            st.session_state.local_endereco_editando_id = (
+                None
+            )
+
+            st.session_state.local_endereco_edit_version += 1
+
+            st.rerun()
+
+
+    if local_endereco:
+
+        st.info(
+            "📍 Alterando o endereço de "
+            f"**{local_endereco['nome']}**"
+        )
+
+
+        with st.container(
+            border=True
+        ):
+
+            st.write(
+                "**Endereço atual:**"
+            )
+
+
+            st.write(
+                local_endereco.get(
+                    "endereco",
+                    "",
+                )
+            )
+
+
+            novo_endereco = campo_local(
+                chave=(
+                    "alterar_endereco_local_"
+                    f"{st.session_state.local_endereco_edit_version}"
+                ),
+                label="Novo endereço",
+                placeholder=(
+                    "Digite pelo menos 3 letras..."
+                ),
+            )
+
+
+            if novo_endereco:
+
+                st.caption(
+                    "📌 Novo endereço selecionado: "
+                    f"{novo_endereco['label']}"
+                )
+
+
+            col_salvar_end, col_cancelar_end = (
+                st.columns(
+                    2
+                )
+            )
+
+
+            with col_salvar_end:
+
+                if st.button(
+                    "💾 Salvar novo endereço",
+                    type="primary",
+                    use_container_width=True,
+                    key=(
+                        "confirmar_novo_endereco_"
+                        f"{local_endereco_id}"
+                    ),
+                ):
+
+                    if not novo_endereco:
+
+                        st.error(
+                            "Selecione o novo endereço."
+                        )
+
+
+                    else:
+
+                        try:
+
+                            atualizar_local_banco(
+                                local_endereco[
+                                    "id"
+                                ],
+                                local_endereco[
+                                    "nome"
+                                ],
+                                local_endereco.get(
+                                    "observacao",
+                                    "",
+                                ),
+                                novo_endereco,
+                            )
+
+
+                            st.session_state.local_endereco_editando_id = (
+                                None
+                            )
+
+
+                            st.session_state.local_endereco_edit_version += 1
+
+
+                            st.session_state.mensagem_sistema = {
+                                "tipo":
+                                    "success",
+
+                                "texto":
+                                    (
+                                        "Endereço de "
+                                        f"'{local_endereco['nome']}' "
+                                        "atualizado com sucesso."
+                                    ),
+                            }
+
+
+                            st.rerun()
+
+
+                        except Exception as e:
+
+                            st.error(
+                                "Não foi possível atualizar "
+                                f"o endereço: {e}"
+                            )
+
+
+            with col_cancelar_end:
+
+                if st.button(
+                    "Cancelar alteração",
+                    use_container_width=True,
+                    key=(
+                        "cancelar_novo_endereco_"
+                        f"{local_endereco_id}"
+                    ),
+                ):
+
+                    st.session_state.local_endereco_editando_id = (
+                        None
+                    )
+
+
+                    st.session_state.local_endereco_edit_version += 1
+
+
+                    st.rerun()
+
+
+        st.caption(
+            "Durante a alteração de endereço, "
+            "o formulário de novo local fica oculto "
+            "para evitar conflito entre campos de busca."
+        )
+
+
+    # ========================================================
+    # CADASTRAR NOVO LOCAL
+    # Apenas quando NÃO estiver alterando endereço.
+    # ========================================================
+
+    else:
+
+        versao = (
+            st.session_state.local_form_version
+        )
+
+
+        with st.expander(
+            "➕ Cadastrar novo local",
+            expanded=False,
+        ):
+
+            nome_novo = st.text_input(
+                "Nome do cliente/local",
+                placeholder=(
+                    "Ex.: Cliente João / Loja Centro / Depósito"
+                ),
+                key=(
+                    f"novo_local_nome_"
+                    f"{versao}"
+                ),
+            )
+
+
+            endereco_novo = campo_local(
+                chave=(
+                    f"novo_local_endereco_"
+                    f"{versao}"
+                ),
+                label="Endereço",
+                placeholder=(
+                    "Digite pelo menos 3 letras..."
+                ),
+            )
+
+
+            observacao_nova = st.text_area(
+                "Observação",
+                placeholder=(
+                    "Ex.: Entregar na portaria / "
+                    "ligar antes / recebe até 16h"
+                ),
+                key=(
+                    f"novo_local_obs_"
+                    f"{versao}"
+                ),
+            )
+
+
+            if endereco_novo:
+
+                st.caption(
+                    "📌 Endereço selecionado: "
+                    f"{endereco_novo['label']}"
+                )
+
+
+            if st.button(
+                "💾 Salvar local",
+                type="primary",
+                use_container_width=True,
+                key=(
+                    f"salvar_novo_local_"
+                    f"{versao}"
+                ),
+            ):
+
+                try:
+
+                    nome_final = (
+                        nome_novo.strip()
+                        or
+                        nome_padrao_local(
+                            endereco_novo
+                            or
+                            {}
+                        )
+                    )
+
+
+                    registro = salvar_local_banco(
+                        nome_final,
+                        endereco_novo,
+                        observacao_nova,
+                    )
+
+
+                    st.session_state.local_form_version += 1
+
+
+                    st.session_state.mensagem_sistema = {
+                        "tipo":
+                            "success",
+
+                        "texto":
+                            (
+                                f"Local "
+                                f"'{registro['nome']}' "
+                                f"salvo com sucesso."
+                            ),
+                    }
+
+
+                    st.rerun()
+
+
+                except Exception as e:
+
+                    st.error(
+                        "Não foi possível salvar "
+                        f"o local: {e}"
+                    )
+
+
+    # ========================================================
+    # SEM LOCAIS
+    # ========================================================
+
     if not locais:
 
         st.info(
@@ -4941,6 +5144,10 @@ def renderizar_locais_salvos():
 
         return
 
+
+    # ========================================================
+    # LISTAGEM
+    # ========================================================
 
     st.divider()
 
@@ -5121,7 +5328,7 @@ def renderizar_locais_salvos():
                 )
 
 
-            col_usar, col_editar = (
+            col_usar, col_endereco = (
                 st.columns(
                     2
                 )
@@ -5149,152 +5356,161 @@ def renderizar_locais_salvos():
                     st.rerun()
 
 
-            with col_editar:
+            with col_endereco:
 
-                with st.expander(
-                    "⚙️ Editar / excluir"
+                if st.button(
+                    "📍 Alterar endereço",
+                    key=(
+                        f"alterar_endereco_"
+                        f"{local_id}"
+                    ),
+                    use_container_width=True,
                 ):
 
-                    nome_edit = st.text_input(
-                        "Nome",
-                        value=nome,
-                        key=(
-                            f"local_nome_edit_"
-                            f"{local_id}"
-                        ),
+                    st.session_state.local_endereco_editando_id = (
+                        local_id
                     )
 
 
-                    obs_edit = st.text_area(
-                        "Observação",
-                        value=observacao,
-                        key=(
-                            f"local_obs_edit_"
-                            f"{local_id}"
-                        ),
-                    )
+                    st.session_state.local_endereco_edit_version += 1
 
 
-                    st.caption(
-                        "Para manter o endereço atual, "
-                        "deixe o campo abaixo sem seleção."
-                    )
+                    st.rerun()
 
 
-                    novo_endereco = campo_local(
-                        chave=(
-                            f"local_novo_endereco_"
-                            f"{local_id}"
-                        ),
-                        label=(
-                            "Trocar endereço (opcional)"
-                        ),
-                        placeholder=(
-                            "Pesquise somente se quiser "
-                            "alterar o endereço..."
-                        ),
-                    )
+            with st.expander(
+                "⚙️ Editar nome, observação ou excluir"
+            ):
+
+                nome_edit = st.text_input(
+                    "Nome",
+                    value=nome,
+                    key=(
+                        f"local_nome_edit_"
+                        f"{local_id}"
+                    ),
+                )
 
 
-                    if st.button(
-                        "💾 Salvar alterações",
-                        key=(
-                            f"salvar_edit_local_"
-                            f"{local_id}"
-                        ),
-                        use_container_width=True,
-                    ):
+                obs_edit = st.text_area(
+                    "Observação",
+                    value=observacao,
+                    key=(
+                        f"local_obs_edit_"
+                        f"{local_id}"
+                    ),
+                )
 
-                        try:
 
-                            atualizar_local_banco(
-                                local_id,
-                                nome_edit,
-                                obs_edit,
-                                novo_endereco,
+                if st.button(
+                    "💾 Salvar nome e observação",
+                    key=(
+                        f"salvar_edit_local_"
+                        f"{local_id}"
+                    ),
+                    use_container_width=True,
+                ):
+
+                    try:
+
+                        atualizar_local_banco(
+                            local_id,
+                            nome_edit,
+                            obs_edit,
+                            None,
+                        )
+
+
+                        st.session_state.mensagem_sistema = {
+                            "tipo":
+                                "success",
+
+                            "texto":
+                                (
+                                    f"Local "
+                                    f"'{nome_edit.strip()}' "
+                                    f"atualizado."
+                                ),
+                        }
+
+
+                        st.rerun()
+
+
+                    except Exception as e:
+
+                        st.error(
+                            "Não foi possível atualizar "
+                            f"o local: {e}"
+                        )
+
+
+                st.divider()
+
+
+                confirmar = st.checkbox(
+                    (
+                        "Confirmo que desejo "
+                        "excluir este local"
+                    ),
+                    key=(
+                        f"confirmar_excluir_local_"
+                        f"{local_id}"
+                    ),
+                )
+
+
+                if st.button(
+                    "🗑️ Excluir local",
+                    key=(
+                        f"excluir_local_"
+                        f"{local_id}"
+                    ),
+                    disabled=(
+                        not confirmar
+                    ),
+                    use_container_width=True,
+                ):
+
+                    try:
+
+                        excluir_local_banco(
+                            local_id
+                        )
+
+
+                        if (
+                            st.session_state.local_endereco_editando_id
+                            == local_id
+                        ):
+
+                            st.session_state.local_endereco_editando_id = (
+                                None
                             )
 
 
-                            st.session_state.mensagem_sistema = {
-                                "tipo":
-                                    "success",
+                        st.session_state.mensagem_sistema = {
+                            "tipo":
+                                "success",
 
-                                "texto":
-                                    (
-                                        f"Local "
-                                        f"'{nome_edit.strip()}' "
-                                        f"atualizado."
-                                    ),
-                            }
-
-
-                            st.rerun()
+                            "texto":
+                                (
+                                    f"Local "
+                                    f"'{nome}' "
+                                    f"excluído."
+                                ),
+                        }
 
 
-                        except Exception as e:
-
-                            st.error(
-                                "Não foi possível atualizar "
-                                f"o local: {e}"
-                            )
+                        st.rerun()
 
 
-                    st.divider()
+                    except Exception as e:
 
-
-                    confirmar = st.checkbox(
-                        (
-                            "Confirmo que desejo "
-                            "excluir este local"
-                        ),
-                        key=(
-                            f"confirmar_excluir_local_"
-                            f"{local_id}"
-                        ),
-                    )
-
-
-                    if st.button(
-                        "🗑️ Excluir local",
-                        key=(
-                            f"excluir_local_"
-                            f"{local_id}"
-                        ),
-                        disabled=(
-                            not confirmar
-                        ),
-                        use_container_width=True,
-                    ):
-
-                        try:
-
-                            excluir_local_banco(
-                                local_id
-                            )
-
-
-                            st.session_state.mensagem_sistema = {
-                                "tipo":
-                                    "success",
-
-                                "texto":
-                                    (
-                                        f"Local "
-                                        f"'{nome}' "
-                                        f"excluído."
-                                    ),
-                            }
-
-
-                            st.rerun()
-
-
-                        except Exception as e:
-
-                            st.error(
-                                "Não foi possível excluir "
-                                f"o local: {e}"
-                            )
+                        st.error(
+                            "Não foi possível excluir "
+                            f"o local: {e}"
+                        )
 
 
 # ============================================================
@@ -7560,17 +7776,6 @@ elif modo_entrada == "Importar CSV/Excel":
                             )
 
 
-                        if (
-                            not inseridos
-                            and
-                            not ignorados
-                        ):
-
-                            st.info(
-                                "Nenhum local precisou ser salvo."
-                            )
-
-
                     except Exception as e:
 
                         st.error(
@@ -7729,7 +7934,7 @@ elif modo_entrada == "Importar CSV/Excel":
 
 
 # ============================================================
-# LOCAIS SALVOS
+# LOCAIS SALVOS NA NOVA ROTA
 # ============================================================
 
 else:
@@ -7756,7 +7961,6 @@ else:
                 "Não foi possível carregar "
                 f"seus locais salvos: {e}"
             )
-
 
             locais_salvos = []
 
