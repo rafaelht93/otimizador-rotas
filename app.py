@@ -1,11 +1,15 @@
 import hashlib
 import html
 import io
+import json
 import unicodedata
+from datetime import datetime
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 import folium
 import pandas as pd
+import requests
 import streamlit as st
 
 from streamlit_folium import st_folium
@@ -48,24 +52,18 @@ if not st.user.is_logged_in:
         "o Otimizador de Rotas."
     )
 
-    st.write(
-        "Sua conta será usada para identificar suas rotas "
-        "e permitir que elas sejam salvas e recuperadas "
-        "posteriormente."
-    )
-
     st.button(
         "🔐 Entrar com Google",
         on_click=st.login,
-        use_container_width=True,
         type="primary",
+        use_container_width=True,
     )
 
     st.stop()
 
 
 # ============================================================
-# DADOS DO USUÁRIO LOGADO
+# USUÁRIO
 # ============================================================
 
 dados_usuario = st.user.to_dict()
@@ -86,17 +84,193 @@ usuario_email = (
     or ""
 )
 
-usuario_foto = (
-    dados_usuario.get("picture")
-)
+
+if not usuario_id:
+
+    st.error(
+        "Não foi possível identificar sua conta Google."
+    )
+
+    st.stop()
+
+
+# ============================================================
+# SECRETS
+# ============================================================
+
+try:
+
+    ORS_KEY = st.secrets[
+        "ORS_KEY"
+    ]
+
+    ors_configurado = True
+
+except Exception:
+
+    ORS_KEY = None
+    ors_configurado = False
+
+
+try:
+
+    SUPABASE_URL = str(
+        st.secrets[
+            "SUPABASE_URL"
+        ]
+    ).rstrip("/")
+
+    SUPABASE_SECRET_KEY = str(
+        st.secrets[
+            "SUPABASE_SECRET_KEY"
+        ]
+    )
+
+    supabase_configurado = True
+
+except Exception:
+
+    SUPABASE_URL = None
+    SUPABASE_SECRET_KEY = None
+    supabase_configurado = False
+
+
+# ============================================================
+# SESSION STATE
+# ============================================================
+
+if "num_paradas" not in st.session_state:
+
+    st.session_state.num_paradas = 1
+
+
+if "erro_autocomplete" not in st.session_state:
+
+    st.session_state.erro_autocomplete = None
+
+
+if "pagina_app" not in st.session_state:
+
+    st.session_state.pagina_app = "nova"
+
+
+if "resultado_rota" not in st.session_state:
+
+    st.session_state.resultado_rota = None
+
+
+if "rota_atual_id" not in st.session_state:
+
+    st.session_state.rota_atual_id = None
+
+
+if "rota_atual_nome" not in st.session_state:
+
+    st.session_state.rota_atual_nome = None
+
+
+if "rota_aberta_salva" not in st.session_state:
+
+    st.session_state.rota_aberta_salva = False
+
+
+if "form_version" not in st.session_state:
+
+    st.session_state.form_version = 0
+
+
+if "mensagem_sistema" not in st.session_state:
+
+    st.session_state.mensagem_sistema = None
+
+
+# ============================================================
+# FUNÇÕES DE ESTADO
+# ============================================================
+
+def limpar_rota_atual():
+
+    st.session_state.resultado_rota = None
+    st.session_state.rota_atual_id = None
+    st.session_state.rota_atual_nome = None
+    st.session_state.rota_aberta_salva = False
+
+
+def iniciar_nova_rota():
+
+    limpar_rota_atual()
+
+    st.session_state.num_paradas = 1
+
+    st.session_state.form_version += 1
+
+    st.session_state.pagina_app = "nova"
+
+
+def abrir_pagina_rotas():
+
+    st.session_state.pagina_app = "minhas"
+
+
+def mostrar_mensagem_sistema():
+
+    mensagem = st.session_state.get(
+        "mensagem_sistema"
+    )
+
+    if not mensagem:
+        return
+
+    tipo = mensagem.get(
+        "tipo"
+    )
+
+    texto = mensagem.get(
+        "texto",
+        ""
+    )
+
+    if tipo == "success":
+
+        st.success(
+            texto
+        )
+
+    elif tipo == "warning":
+
+        st.warning(
+            texto
+        )
+
+    elif tipo == "error":
+
+        st.error(
+            texto
+        )
+
+    else:
+
+        st.info(
+            texto
+        )
+
+    st.session_state.mensagem_sistema = None
 
 
 # ============================================================
 # CABEÇALHO
 # ============================================================
 
-col_titulo, col_usuario, col_sair = st.columns(
-    [5, 2, 1]
+col_titulo, col_nova, col_rotas, col_usuario, col_sair = (
+    st.columns(
+        [
+            4.5,
+            1.2,
+            1.3,
+            2,
+            0.8,
+        ]
+    )
 )
 
 
@@ -105,6 +279,34 @@ with col_titulo:
     st.title(
         "🗺️ Otimizador de Rotas"
     )
+
+
+with col_nova:
+
+    st.write("")
+
+    if st.button(
+        "➕ Nova rota",
+        use_container_width=True,
+    ):
+
+        iniciar_nova_rota()
+
+        st.rerun()
+
+
+with col_rotas:
+
+    st.write("")
+
+    if st.button(
+        "📂 Minhas rotas",
+        use_container_width=True,
+    ):
+
+        abrir_pagina_rotas()
+
+        st.rerun()
 
 
 with col_usuario:
@@ -122,6 +324,8 @@ with col_usuario:
 
 with col_sair:
 
+    st.write("")
+
     st.button(
         "Sair",
         on_click=st.logout,
@@ -129,53 +333,378 @@ with col_sair:
     )
 
 
-st.write(
-    "Informe os locais manualmente ou importe uma lista "
-    "por CSV/Excel. O sistema calculará a melhor sequência "
-    "da rota."
-)
+mostrar_mensagem_sistema()
 
 
 # ============================================================
-# OPENROUTESERVICE
+# SUPABASE - REQUISIÇÃO
 # ============================================================
 
-try:
+def supabase_request(
+    method,
+    params=None,
+    json_body=None,
+    prefer=None,
+):
 
-    ORS_KEY = st.secrets[
-        "ORS_KEY"
-    ]
+    if not supabase_configurado:
 
-    ors_configurado = True
-
-
-except Exception:
-
-    ORS_KEY = None
-
-    ors_configurado = False
+        raise RuntimeError(
+            "Supabase não configurado."
+        )
 
 
-if not ors_configurado:
+    headers = {
+        "apikey":
+            SUPABASE_SECRET_KEY,
 
-    st.error(
-        "OpenRouteService não configurado. "
-        "Cadastre ORS_KEY nos Secrets do Streamlit."
+        "Content-Type":
+            "application/json",
+    }
+
+
+    if prefer:
+
+        headers[
+            "Prefer"
+        ] = prefer
+
+
+    try:
+
+        response = requests.request(
+            method=method,
+            url=(
+                f"{SUPABASE_URL}"
+                "/rest/v1/rotas"
+            ),
+            headers=headers,
+            params=params,
+            json=json_body,
+            timeout=20,
+        )
+
+
+    except requests.Timeout as e:
+
+        raise RuntimeError(
+            "O Supabase demorou demais para responder."
+        ) from e
+
+
+    except requests.RequestException as e:
+
+        raise RuntimeError(
+            "Não foi possível conectar ao Supabase."
+        ) from e
+
+
+    if response.status_code >= 400:
+
+        raise RuntimeError(
+            "Erro ao acessar o banco de dados "
+            f"(HTTP {response.status_code}). "
+            f"{response.text[:300]}"
+        )
+
+
+    if (
+        response.status_code == 204
+        or
+        not response.text.strip()
+    ):
+
+        return []
+
+
+    try:
+
+        return response.json()
+
+    except ValueError:
+
+        return []
+
+
+# ============================================================
+# SUPABASE - LISTAR
+# ============================================================
+
+def listar_rotas_usuario():
+
+    return supabase_request(
+        "GET",
+        params={
+            "select":
+                (
+                    "id,nome,dados,"
+                    "created_at,updated_at"
+                ),
+
+            "user_id":
+                f"eq.{usuario_id}",
+
+            "order":
+                "updated_at.desc",
+        },
     )
 
 
 # ============================================================
-# SESSION STATE
+# JSON SEGURO
 # ============================================================
 
-if "num_paradas" not in st.session_state:
+def preparar_json(
+    dados,
+):
 
-    st.session_state.num_paradas = 1
+    return json.loads(
+        json.dumps(
+            dados,
+            ensure_ascii=False,
+            default=str,
+        )
+    )
 
 
-if "erro_autocomplete" not in st.session_state:
+# ============================================================
+# SUPABASE - SALVAR
+# ============================================================
 
-    st.session_state.erro_autocomplete = None
+def salvar_rota_banco(
+    nome,
+    dados,
+):
+
+    nome = (
+        nome or ""
+    ).strip()
+
+
+    if not nome:
+
+        raise ValueError(
+            "Informe um nome para a rota."
+        )
+
+
+    resultado = supabase_request(
+        "POST",
+        json_body={
+            "user_id":
+                usuario_id,
+
+            "nome":
+                nome,
+
+            "dados":
+                preparar_json(
+                    dados
+                ),
+        },
+        prefer="return=representation",
+    )
+
+
+    if not resultado:
+
+        raise RuntimeError(
+            "A rota foi enviada, mas o banco "
+            "não retornou o registro criado."
+        )
+
+
+    return resultado[
+        0
+    ]
+
+
+# ============================================================
+# SUPABASE - ATUALIZAR DADOS
+# ============================================================
+
+def atualizar_rota_banco(
+    rota_id,
+    dados,
+):
+
+    agora = (
+        datetime
+        .now()
+        .astimezone()
+        .isoformat()
+    )
+
+
+    resultado = supabase_request(
+        "PATCH",
+        params={
+            "id":
+                f"eq.{rota_id}",
+
+            "user_id":
+                f"eq.{usuario_id}",
+        },
+        json_body={
+            "dados":
+                preparar_json(
+                    dados
+                ),
+
+            "updated_at":
+                agora,
+        },
+        prefer="return=representation",
+    )
+
+
+    if not resultado:
+
+        raise RuntimeError(
+            "A rota não foi encontrada "
+            "ou não pertence ao usuário."
+        )
+
+
+    return resultado[
+        0
+    ]
+
+
+# ============================================================
+# SUPABASE - RENOMEAR
+# ============================================================
+
+def renomear_rota_banco(
+    rota_id,
+    novo_nome,
+):
+
+    novo_nome = (
+        novo_nome or ""
+    ).strip()
+
+
+    if not novo_nome:
+
+        raise ValueError(
+            "Informe o novo nome da rota."
+        )
+
+
+    agora = (
+        datetime
+        .now()
+        .astimezone()
+        .isoformat()
+    )
+
+
+    resultado = supabase_request(
+        "PATCH",
+        params={
+            "id":
+                f"eq.{rota_id}",
+
+            "user_id":
+                f"eq.{usuario_id}",
+        },
+        json_body={
+            "nome":
+                novo_nome,
+
+            "updated_at":
+                agora,
+        },
+        prefer="return=representation",
+    )
+
+
+    if not resultado:
+
+        raise RuntimeError(
+            "A rota não foi encontrada."
+        )
+
+
+    return resultado[
+        0
+    ]
+
+
+# ============================================================
+# SUPABASE - EXCLUIR
+# ============================================================
+
+def excluir_rota_banco(
+    rota_id,
+):
+
+    resultado = supabase_request(
+        "DELETE",
+        params={
+            "id":
+                f"eq.{rota_id}",
+
+            "user_id":
+                f"eq.{usuario_id}",
+        },
+        prefer="return=representation",
+    )
+
+
+    if not resultado:
+
+        raise RuntimeError(
+            "A rota não foi encontrada."
+        )
+
+
+    return True
+
+
+# ============================================================
+# DATA/HORA
+# ============================================================
+
+def formatar_data(
+    valor,
+):
+
+    if not valor:
+
+        return ""
+
+
+    try:
+
+        data = datetime.fromisoformat(
+            str(
+                valor
+            ).replace(
+                "Z",
+                "+00:00",
+            )
+        )
+
+
+        data = data.astimezone(
+            ZoneInfo(
+                "America/Sao_Paulo"
+            )
+        )
+
+
+        return data.strftime(
+            "%d/%m/%Y às %H:%M"
+        )
+
+
+    except Exception:
+
+        return str(
+            valor
+        )
 
 
 # ============================================================
@@ -203,7 +732,7 @@ def buscar_sugestoes_cache(
 
 
 # ============================================================
-# CACHE ENDEREÇOS IMPORTADOS
+# CACHE IMPORTAÇÃO
 # ============================================================
 
 @st.cache_data(
@@ -282,14 +811,13 @@ def buscar_sugestoes(
     ).strip()
 
 
-    if len(
-        texto
-    ) < 3:
-
-        return []
-
-
-    if not ors_configurado:
+    if (
+        len(
+            texto
+        ) < 3
+        or
+        not ors_configurado
+    ):
 
         return []
 
@@ -305,6 +833,7 @@ def buscar_sugestoes(
             )
         )
 
+
         st.session_state.erro_autocomplete = (
             None
         )
@@ -313,7 +842,9 @@ def buscar_sugestoes(
     except ORSError as e:
 
         st.session_state.erro_autocomplete = (
-            str(e)
+            str(
+                e
+            )
         )
 
         return []
@@ -342,7 +873,7 @@ def buscar_sugestoes(
 
 
 # ============================================================
-# CAMPO DE LOCAL
+# CAMPO LOCAL
 # ============================================================
 
 def campo_local(
@@ -386,7 +917,7 @@ def campo_local(
 
 
 # ============================================================
-# NORMALIZAÇÃO
+# NORMALIZA TEXTO
 # ============================================================
 
 def normalizar_texto(
@@ -412,7 +943,7 @@ def normalizar_texto(
 
 
 # ============================================================
-# LOCALIZA COLUNA ENDEREÇO
+# COLUNA ENDEREÇO
 # ============================================================
 
 def localizar_coluna_endereco(
@@ -435,7 +966,7 @@ def localizar_coluna_endereco(
 
 
 # ============================================================
-# DECODIFICA CSV
+# CSV
 # ============================================================
 
 def decodificar_csv(
@@ -448,17 +979,12 @@ def decodificar_csv(
             "utf-8-sig"
         )
 
-
     except UnicodeDecodeError:
 
         return bytes_arquivo.decode(
             "latin1"
         )
 
-
-# ============================================================
-# LIMPA LINHA CSV
-# ============================================================
 
 def limpar_linha_csv_simples(
     linha,
@@ -468,7 +994,9 @@ def limpar_linha_csv_simples(
 
 
     if (
-        len(valor) >= 2
+        len(
+            valor
+        ) >= 2
         and
         (
             (
@@ -506,10 +1034,6 @@ def limpar_linha_csv_simples(
     return valor.strip()
 
 
-# ============================================================
-# LEITOR CSV
-# ============================================================
-
 def ler_csv_robusto(
     bytes_arquivo,
 ):
@@ -544,10 +1068,6 @@ def ler_csv_robusto(
     )
 
 
-    # ========================================================
-    # CSV COM UMA COLUNA
-    # ========================================================
-
     if cabecalho == "endereco":
 
         enderecos = []
@@ -579,10 +1099,6 @@ def ler_csv_robusto(
         )
 
 
-    # ========================================================
-    # CSV COM MÚLTIPLAS COLUNAS
-    # ========================================================
-
     for separador in (
         ";",
         ",",
@@ -597,7 +1113,6 @@ def ler_csv_robusto(
                 ),
                 sep=separador,
             )
-
 
         except Exception:
 
@@ -621,7 +1136,7 @@ def ler_csv_robusto(
 
 
 # ============================================================
-# LEITURA CSV / EXCEL
+# LEITURA ARQUIVO
 # ============================================================
 
 def ler_arquivo_paradas(
@@ -675,10 +1190,8 @@ def ler_arquivo_paradas(
         )
 
 
-    coluna = (
-        localizar_coluna_endereco(
-            dataframe
-        )
+    coluna = localizar_coluna_endereco(
+        dataframe
     )
 
 
@@ -705,15 +1218,15 @@ def ler_arquivo_paradas(
             continue
 
 
-        valor = str(
+        endereco = str(
             valor
         ).strip()
 
 
-        if valor:
+        if endereco:
 
             enderecos.append(
-                valor
+                endereco
             )
 
 
@@ -751,22 +1264,28 @@ def converter_local(
 ):
 
     return {
-
         "nome":
             origem.get(
                 "label",
-                ""
+                origem.get(
+                    "nome",
+                    "",
+                ),
             ),
 
         "latitude":
-            origem[
-                "latitude"
-            ],
+            float(
+                origem[
+                    "latitude"
+                ]
+            ),
 
         "longitude":
-            origem[
-                "longitude"
-            ],
+            float(
+                origem[
+                    "longitude"
+                ]
+            ),
 
         "tipo":
             tipo,
@@ -809,6 +1328,231 @@ def converter_local(
 
 
 # ============================================================
+# CALCULA ROTA A PARTIR DOS LOCAIS
+# ============================================================
+
+def calcular_rota_a_partir_de_locais(
+    locais,
+    voltar_inicio,
+    objetivo,
+    modo,
+):
+
+    if not ors_configurado:
+
+        raise ORSError(
+            "OpenRouteService não configurado."
+        )
+
+
+    if len(
+        locais
+    ) < 2:
+
+        raise RouteOptimizationError(
+            "São necessários pelo menos "
+            "dois locais."
+        )
+
+
+    coordenadas = tuple(
+        (
+            local[
+                "latitude"
+            ],
+            local[
+                "longitude"
+            ],
+        )
+        for local
+        in locais
+    )
+
+
+    start_idx = 0
+
+
+    end_idx = (
+        0
+        if voltar_inicio
+        else
+        len(
+            locais
+        ) - 1
+    )
+
+
+    matrix_data = (
+        obter_matrix_cache_v2(
+            coordenadas,
+            ORS_KEY,
+        )
+    )
+
+
+    if not isinstance(
+        matrix_data,
+        dict,
+    ):
+
+        raise RouteOptimizationError(
+            "A Matrix API retornou "
+            "um formato incompatível."
+        )
+
+
+    if (
+        "distancias"
+        not in matrix_data
+        or
+        "duracoes"
+        not in matrix_data
+    ):
+
+        raise RouteOptimizationError(
+            "A Matrix API não retornou "
+            "distâncias e tempos."
+        )
+
+
+    if objetivo == "Menor distância":
+
+        matrix_otimizacao = (
+            matrix_data[
+                "distancias"
+            ]
+        )
+
+    else:
+
+        matrix_otimizacao = (
+            matrix_data[
+                "duracoes"
+            ]
+        )
+
+
+    resultado_solver = otimizar_rota(
+        matrix_m=matrix_otimizacao,
+        start_idx=start_idx,
+        end_idx=end_idx,
+        modo=modo,
+    )
+
+
+    locais_ordenados = [
+        locais[
+            indice
+        ]
+        for indice
+        in resultado_solver[
+            "route"
+        ]
+    ]
+
+
+    coordenadas_ordenadas = tuple(
+        (
+            local[
+                "latitude"
+            ],
+            local[
+                "longitude"
+            ],
+        )
+        for local
+        in locais_ordenados
+    )
+
+
+    rota_real = obter_directions_cache(
+        coordenadas_ordenadas,
+        ORS_KEY,
+    )
+
+
+    gap = resultado_solver.get(
+        "gap_percent"
+    )
+
+
+    if gap is not None:
+
+        gap = float(
+            gap
+        )
+
+
+    return {
+        "versao":
+            1,
+
+        "voltar_inicio":
+            bool(
+                voltar_inicio
+            ),
+
+        "objetivo":
+            objetivo,
+
+        "modo":
+            modo,
+
+        "locais_base":
+            preparar_json(
+                locais
+            ),
+
+        "locais_ordenados":
+            preparar_json(
+                locais_ordenados
+            ),
+
+        "distancia_m":
+            float(
+                rota_real[
+                    "distancia_m"
+                ]
+            ),
+
+        "duracao_s":
+            float(
+                rota_real[
+                    "duracao_s"
+                ]
+            ),
+
+        "geometry":
+            preparar_json(
+                rota_real[
+                    "geometry"
+                ]
+            ),
+
+        "solver": {
+            "status":
+                str(
+                    resultado_solver.get(
+                        "status",
+                        "",
+                    )
+                ),
+
+            "metodo":
+                str(
+                    resultado_solver.get(
+                        "metodo",
+                        "",
+                    )
+                ),
+
+            "gap_percent":
+                gap,
+        },
+    }
+
+
+# ============================================================
 # CRIA MAPA
 # ============================================================
 
@@ -839,7 +1583,6 @@ def criar_mapa(
 
 
     centro = [
-
         sum(
             ponto[
                 0
@@ -931,7 +1674,6 @@ def criar_mapa(
 
 
         folium.Marker(
-
             location=[
                 local[
                     "latitude"
@@ -940,21 +1682,17 @@ def criar_mapa(
                     "longitude"
                 ],
             ],
-
             tooltip=(
                 f"{numero}. "
                 f"{nome}"
             ),
-
             popup=folium.Popup(
                 nome,
                 max_width=350,
             ),
-
             icon=folium.DivIcon(
                 html=marcador_html
             ),
-
         ).add_to(
             mapa
         )
@@ -970,7 +1708,6 @@ def criar_mapa(
                     for ponto
                     in path
                 ),
-
                 min(
                     ponto[
                         1
@@ -987,7 +1724,6 @@ def criar_mapa(
                     for ponto
                     in path
                 ),
-
                 max(
                     ponto[
                         1
@@ -1004,7 +1740,8 @@ def criar_mapa(
         "Distância"
         if objetivo
         == "Menor distância"
-        else "Tempo"
+        else
+        "Tempo"
     )
 
 
@@ -1043,7 +1780,7 @@ def criar_mapa(
 
 
 # ============================================================
-# HTML DO MAPA
+# MAPA HTML
 # ============================================================
 
 def gerar_html_mapa(
@@ -1164,14 +1901,10 @@ def montar_referencia_google(
         or
         local.get(
             "nome",
-            ""
+            "",
         )
     )
 
-
-# ============================================================
-# COORDENADA GOOGLE
-# ============================================================
 
 def coordenada_google_maps(
     local,
@@ -1182,10 +1915,6 @@ def coordenada_google_maps(
         f"{local['longitude']:.7f}"
     )
 
-
-# ============================================================
-# URL GOOGLE MAPS
-# ============================================================
 
 def gerar_url_google_maps(
     locais_trecho,
@@ -1209,7 +1938,6 @@ def gerar_url_google_maps(
             in locais_trecho
         ]
 
-
     else:
 
         referencias = [
@@ -1222,7 +1950,6 @@ def gerar_url_google_maps(
 
 
     params = {
-
         "api":
             "1",
 
@@ -1264,10 +1991,6 @@ def gerar_url_google_maps(
         )
     )
 
-
-# ============================================================
-# DIVIDE ROTA GOOGLE
-# ============================================================
 
 def dividir_rota_google_maps(
     locais_ordenados,
@@ -1323,7 +2046,7 @@ def dividir_rota_google_maps(
 
 
 # ============================================================
-# DATAFRAME DA ROTA
+# DATAFRAME EXPORTAÇÃO
 # ============================================================
 
 def dataframe_rota_otimizada(
@@ -1347,7 +2070,6 @@ def dataframe_rota_otimizada(
 
             tipo = "Início"
 
-
         elif (
             rota_fechada
             and
@@ -1356,7 +2078,6 @@ def dataframe_rota_otimizada(
 
             tipo = "Retorno"
 
-
         elif (
             not rota_fechada
             and
@@ -1364,7 +2085,6 @@ def dataframe_rota_otimizada(
         ):
 
             tipo = "Fim"
-
 
         else:
 
@@ -1402,10 +2122,6 @@ def dataframe_rota_otimizada(
     )
 
 
-# ============================================================
-# CSV
-# ============================================================
-
 def gerar_csv_rota(
     dataframe,
 ):
@@ -1421,10 +2137,6 @@ def gerar_csv_rota(
         )
     )
 
-
-# ============================================================
-# EXCEL
-# ============================================================
 
 def gerar_excel_rota(
     dataframe,
@@ -1455,7 +2167,8 @@ def gerar_excel_rota(
                         "Distância"
                         if objetivo
                         == "Menor distância"
-                        else "Tempo"
+                        else
+                        "Tempo"
                     ),
 
                 "Modo":
@@ -1465,7 +2178,8 @@ def gerar_excel_rota(
                     (
                         "Fechada"
                         if voltar_inicio
-                        else "Aberta"
+                        else
+                        "Aberta"
                     ),
 
                 "Quantidade de pontos":
@@ -1505,8 +2219,1305 @@ def gerar_excel_rota(
 
 
 # ============================================================
-# ENTRADA
+# RENDERIZA RESULTADO
 # ============================================================
+
+def renderizar_resultado_rota(
+    dados,
+):
+
+    if not dados:
+
+        return
+
+
+    locais_ordenados = (
+        dados.get(
+            "locais_ordenados"
+        )
+        or
+        []
+    )
+
+
+    locais_base = (
+        dados.get(
+            "locais_base"
+        )
+        or
+        []
+    )
+
+
+    geometry = (
+        dados.get(
+            "geometry"
+        )
+        or
+        []
+    )
+
+
+    voltar_inicio = bool(
+        dados.get(
+            "voltar_inicio",
+            False,
+        )
+    )
+
+
+    objetivo = dados.get(
+        "objetivo",
+        "Menor distância",
+    )
+
+
+    modo = dados.get(
+        "modo",
+        "Rápido",
+    )
+
+
+    distancia_m = float(
+        dados.get(
+            "distancia_m",
+            0,
+        )
+    )
+
+
+    duracao_s = float(
+        dados.get(
+            "duracao_s",
+            0,
+        )
+    )
+
+
+    solver = (
+        dados.get(
+            "solver"
+        )
+        or
+        {}
+    )
+
+
+    distancia_km = (
+        distancia_m
+        / 1000
+    )
+
+
+    minutos_total = round(
+        duracao_s
+        / 60
+    )
+
+
+    horas, minutos = divmod(
+        minutos_total,
+        60,
+    )
+
+
+    tempo_texto = (
+        f"{horas}h "
+        f"{minutos:02d}min"
+        if horas
+        else
+        f"{minutos} min"
+    )
+
+
+    # ========================================================
+    # IDENTIFICAÇÃO DE ROTA SALVA
+    # ========================================================
+
+    if (
+        st.session_state.rota_atual_id
+        and
+        st.session_state.rota_atual_nome
+    ):
+
+        st.info(
+            "📂 Rota salva aberta: "
+            f"**{st.session_state.rota_atual_nome}**"
+        )
+
+
+        col_recalcular, col_atualizar = (
+            st.columns(
+                2
+            )
+        )
+
+
+        with col_recalcular:
+
+            if st.button(
+                "🔄 Recalcular esta rota",
+                use_container_width=True,
+                key="recalcular_rota_aberta",
+            ):
+
+                try:
+
+                    with st.spinner(
+                        "Recalculando a rota "
+                        "com as coordenadas salvas..."
+                    ):
+
+                        novo_resultado = (
+                            calcular_rota_a_partir_de_locais(
+                                locais=locais_base,
+                                voltar_inicio=voltar_inicio,
+                                objetivo=objetivo,
+                                modo=modo,
+                            )
+                        )
+
+
+                    st.session_state.resultado_rota = (
+                        novo_resultado
+                    )
+
+
+                    st.session_state.mensagem_sistema = {
+                        "tipo":
+                            "success",
+
+                        "texto":
+                            (
+                                "Rota recalculada. "
+                                "Use 'Atualizar rota salva' "
+                                "se quiser substituir a versão "
+                                "armazenada no banco."
+                            ),
+                    }
+
+
+                    st.rerun()
+
+
+                except Exception as e:
+
+                    st.error(
+                        f"Não foi possível recalcular: {e}"
+                    )
+
+
+        with col_atualizar:
+
+            if st.button(
+                "💾 Atualizar rota salva",
+                type="primary",
+                use_container_width=True,
+                key="atualizar_rota_aberta",
+            ):
+
+                try:
+
+                    atualizar_rota_banco(
+                        st.session_state.rota_atual_id,
+                        dados,
+                    )
+
+
+                    st.success(
+                        "Rota salva atualizada."
+                    )
+
+
+                except Exception as e:
+
+                    st.error(
+                        f"Não foi possível atualizar: {e}"
+                    )
+
+
+    # ========================================================
+    # MÉTRICAS
+    # ========================================================
+
+    st.subheader(
+        "✅ Resultado da rota"
+    )
+
+
+    col1, col2, col3, col4 = (
+        st.columns(
+            4
+        )
+    )
+
+
+    with col1:
+
+        st.metric(
+            "Distância total",
+            f"{distancia_km:.2f} km",
+        )
+
+
+    with col2:
+
+        st.metric(
+            "Tempo estimado",
+            tempo_texto,
+        )
+
+
+    with col3:
+
+        st.metric(
+            "Locais",
+            len(
+                locais_base
+            ),
+        )
+
+
+    with col4:
+
+        st.metric(
+            "Otimizado por",
+            (
+                "Distância"
+                if objetivo
+                == "Menor distância"
+                else
+                "Tempo"
+            ),
+        )
+
+
+    st.caption(
+        f"Modo utilizado: **{modo}**"
+    )
+
+
+    # ========================================================
+    # STATUS SOLVER
+    # ========================================================
+
+    status_solver = solver.get(
+        "status"
+    )
+
+
+    gap = solver.get(
+        "gap_percent"
+    )
+
+
+    if status_solver == "ÓTIMA COMPROVADA":
+
+        st.success(
+            "🏆 Rota ótima "
+            "matematicamente comprovada."
+        )
+
+
+    elif gap is not None:
+
+        st.info(
+            "🎯 Melhor rota encontrada. "
+            f"Gap máximo restante: "
+            f"{float(gap):.3f}%."
+        )
+
+
+    elif status_solver:
+
+        st.info(
+            f"⚡ Status da otimização: "
+            f"**{status_solver}**."
+        )
+
+
+    # ========================================================
+    # ORDEM
+    # ========================================================
+
+    st.subheader(
+        "📋 Ordem da rota"
+    )
+
+
+    lista_exibir = (
+        locais_ordenados[
+            :-1
+        ]
+        if voltar_inicio
+        else
+        locais_ordenados
+    )
+
+
+    for numero, local in enumerate(
+        lista_exibir,
+        start=1,
+    ):
+
+        st.write(
+            f"**{numero}.** "
+            f"{local['nome']}"
+        )
+
+
+    if (
+        voltar_inicio
+        and
+        locais_ordenados
+    ):
+
+        st.write(
+            f"**{len(lista_exibir) + 1}.** "
+            f"{locais_ordenados[-1]['nome']} "
+            f"_(retorno)_"
+        )
+
+
+    # ========================================================
+    # SALVAR NO SUPABASE
+    # ========================================================
+
+    st.subheader(
+        "☁️ Salvar rota"
+    )
+
+
+    if not supabase_configurado:
+
+        st.warning(
+            "Supabase não está configurado."
+        )
+
+
+    elif not st.session_state.rota_atual_id:
+
+        with st.form(
+            "form_salvar_rota"
+        ):
+
+            nome_rota = st.text_input(
+                "Nome da rota",
+                placeholder=(
+                    "Ex.: Clientes terça-feira"
+                ),
+            )
+
+
+            salvar = st.form_submit_button(
+                "💾 Salvar em Minhas rotas",
+                type="primary",
+                use_container_width=True,
+            )
+
+
+            if salvar:
+
+                try:
+
+                    registro = salvar_rota_banco(
+                        nome_rota,
+                        dados,
+                    )
+
+
+                    st.session_state.rota_atual_id = (
+                        registro[
+                            "id"
+                        ]
+                    )
+
+
+                    st.session_state.rota_atual_nome = (
+                        registro[
+                            "nome"
+                        ]
+                    )
+
+
+                    st.session_state.mensagem_sistema = {
+                        "tipo":
+                            "success",
+
+                        "texto":
+                            (
+                                f"Rota "
+                                f"'{registro['nome']}' "
+                                f"salva com sucesso."
+                            ),
+                    }
+
+
+                    st.rerun()
+
+
+                except Exception as e:
+
+                    st.error(
+                        f"Não foi possível salvar: {e}"
+                    )
+
+
+    else:
+
+        st.success(
+            "Esta rota já está salva como "
+            f"**{st.session_state.rota_atual_nome}**."
+        )
+
+
+        with st.expander(
+            "Salvar uma cópia com outro nome"
+        ):
+
+            with st.form(
+                "form_salvar_copia"
+            ):
+
+                nome_copia = st.text_input(
+                    "Nome da nova rota",
+                    placeholder=(
+                        "Ex.: Clientes quarta-feira"
+                    ),
+                )
+
+
+                salvar_copia = (
+                    st.form_submit_button(
+                        "💾 Salvar como nova rota",
+                        use_container_width=True,
+                    )
+                )
+
+
+                if salvar_copia:
+
+                    try:
+
+                        registro = salvar_rota_banco(
+                            nome_copia,
+                            dados,
+                        )
+
+
+                        st.session_state.rota_atual_id = (
+                            registro[
+                                "id"
+                            ]
+                        )
+
+
+                        st.session_state.rota_atual_nome = (
+                            registro[
+                                "nome"
+                            ]
+                        )
+
+
+                        st.session_state.mensagem_sistema = {
+                            "tipo":
+                                "success",
+
+                            "texto":
+                                (
+                                    "Cópia salva como "
+                                    f"'{registro['nome']}'."
+                                ),
+                        }
+
+
+                        st.rerun()
+
+
+                    except Exception as e:
+
+                        st.error(
+                            f"Não foi possível salvar "
+                            f"a cópia: {e}"
+                        )
+
+
+    # ========================================================
+    # MAPA
+    # ========================================================
+
+    try:
+
+        mapa = criar_mapa(
+            geometry=geometry,
+            locais_ordenados=locais_ordenados,
+            rota_fechada=voltar_inicio,
+            distancia_km=distancia_km,
+            tempo_texto=tempo_texto,
+            objetivo=objetivo,
+        )
+
+
+    except Exception as e:
+
+        st.error(
+            f"Não foi possível montar o mapa: {e}"
+        )
+
+        return
+
+
+    # ========================================================
+    # EXPORTAÇÃO
+    # ========================================================
+
+    st.subheader(
+        "💾 Exportar rota"
+    )
+
+
+    dataframe_exportacao = (
+        dataframe_rota_otimizada(
+            locais_ordenados,
+            voltar_inicio,
+        )
+    )
+
+
+    csv_exportacao = (
+        gerar_csv_rota(
+            dataframe_exportacao
+        )
+    )
+
+
+    excel_exportacao = (
+        gerar_excel_rota(
+            dataframe_exportacao,
+            distancia_km,
+            tempo_texto,
+            objetivo,
+            modo,
+            voltar_inicio,
+        )
+    )
+
+
+    html_mapa = (
+        gerar_html_mapa(
+            mapa
+        )
+    )
+
+
+    col_csv, col_excel, col_mapa = (
+        st.columns(
+            3
+        )
+    )
+
+
+    with col_csv:
+
+        st.download_button(
+            "⬇️ Baixar rota em CSV",
+            data=csv_exportacao,
+            file_name="rota_otimizada.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+
+    with col_excel:
+
+        st.download_button(
+            "⬇️ Baixar relatório em Excel",
+            data=excel_exportacao,
+            file_name="rota_otimizada.xlsx",
+            mime=(
+                "application/vnd.openxmlformats-"
+                "officedocument.spreadsheetml.sheet"
+            ),
+            use_container_width=True,
+        )
+
+
+    with col_mapa:
+
+        st.download_button(
+            "🗺️ Baixar mapa interativo",
+            data=html_mapa,
+            file_name=(
+                "mapa_rota_otimizada.html"
+            ),
+            mime="text/html",
+            use_container_width=True,
+        )
+
+
+    # ========================================================
+    # GOOGLE MAPS
+    # ========================================================
+
+    st.subheader(
+        "🧭 Navegação no Google Maps"
+    )
+
+
+    st.caption(
+        "A ordem foi calculada pelo Otimizador de Rotas. "
+        "O Google Maps é utilizado apenas para navegação."
+    )
+
+
+    trechos_google = (
+        dividir_rota_google_maps(
+            locais_ordenados,
+            max_pontos_por_trecho=5,
+        )
+    )
+
+
+    if len(
+        trechos_google
+    ) == 1:
+
+        st.link_button(
+            "🧭 Abrir rota no Google Maps",
+            gerar_url_google_maps(
+                trechos_google[
+                    0
+                ]
+            ),
+            use_container_width=True,
+        )
+
+
+        with st.expander(
+            "Opções avançadas de navegação"
+        ):
+
+            st.link_button(
+                "📍 Abrir usando coordenadas",
+                gerar_url_google_maps(
+                    trechos_google[
+                        0
+                    ],
+                    usar_coordenadas=True,
+                ),
+                use_container_width=True,
+            )
+
+
+    else:
+
+        st.info(
+            f"A rota foi dividida em "
+            f"{len(trechos_google)} trechos."
+        )
+
+
+        for numero_trecho, trecho in enumerate(
+            trechos_google,
+            start=1,
+        ):
+
+            with st.expander(
+                (
+                    f"Trecho {numero_trecho}: "
+                    f"{trecho[0]['nome']} → "
+                    f"{trecho[-1]['nome']}"
+                ),
+                expanded=(
+                    numero_trecho == 1
+                ),
+            ):
+
+                for numero_local, local in enumerate(
+                    trecho,
+                    start=1,
+                ):
+
+                    st.write(
+                        f"**{numero_local}.** "
+                        f"{local['nome']}"
+                    )
+
+
+                st.link_button(
+                    (
+                        f"🧭 Abrir trecho "
+                        f"{numero_trecho} "
+                        f"no Google Maps"
+                    ),
+                    gerar_url_google_maps(
+                        trecho
+                    ),
+                    use_container_width=True,
+                )
+
+
+                st.link_button(
+                    "📍 Alternativa por coordenadas",
+                    gerar_url_google_maps(
+                        trecho,
+                        usar_coordenadas=True,
+                    ),
+                    use_container_width=True,
+                )
+
+
+    # ========================================================
+    # MAPA NA TELA
+    # ========================================================
+
+    st.subheader(
+        "🗺️ Mapa da rota"
+    )
+
+
+    st_folium(
+        mapa,
+        height=600,
+        use_container_width=True,
+        returned_objects=[],
+    )
+
+
+# ============================================================
+# MINHAS ROTAS
+# ============================================================
+
+def renderizar_minhas_rotas():
+
+    st.subheader(
+        "📂 Minhas rotas"
+    )
+
+
+    st.write(
+        "As rotas desta página pertencem à sua "
+        "conta Google atualmente conectada."
+    )
+
+
+    if not supabase_configurado:
+
+        st.error(
+            "Supabase não configurado."
+        )
+
+        return
+
+
+    try:
+
+        with st.spinner(
+            "Carregando suas rotas..."
+        ):
+
+            rotas = (
+                listar_rotas_usuario()
+            )
+
+
+    except Exception as e:
+
+        st.error(
+            f"Não foi possível carregar "
+            f"as rotas: {e}"
+        )
+
+        return
+
+
+    if not rotas:
+
+        st.info(
+            "Você ainda não possui rotas salvas."
+        )
+
+        return
+
+
+    st.caption(
+        f"{len(rotas)} rota(s) salva(s)."
+    )
+
+
+    for rota in rotas:
+
+        rota_id = rota[
+            "id"
+        ]
+
+        nome = rota.get(
+            "nome",
+            "Rota sem nome",
+        )
+
+        dados = (
+            rota.get(
+                "dados"
+            )
+            or
+            {}
+        )
+
+
+        locais_base = (
+            dados.get(
+                "locais_base"
+            )
+            or
+            []
+        )
+
+
+        objetivo = dados.get(
+            "objetivo",
+            "—",
+        )
+
+
+        modo = dados.get(
+            "modo",
+            "—",
+        )
+
+
+        voltar_inicio = bool(
+            dados.get(
+                "voltar_inicio",
+                False,
+            )
+        )
+
+
+        atualizado = formatar_data(
+            rota.get(
+                "updated_at"
+            )
+        )
+
+
+        with st.container(
+            border=True
+        ):
+
+            st.markdown(
+                f"### {nome}"
+            )
+
+
+            col_a, col_b, col_c, col_d = (
+                st.columns(
+                    4
+                )
+            )
+
+
+            with col_a:
+
+                st.metric(
+                    "Locais",
+                    len(
+                        locais_base
+                    ),
+                )
+
+
+            with col_b:
+
+                st.metric(
+                    "Objetivo",
+                    (
+                        "Distância"
+                        if objetivo
+                        == "Menor distância"
+                        else
+                        "Tempo"
+                        if objetivo
+                        == "Menor tempo"
+                        else
+                        objetivo
+                    ),
+                )
+
+
+            with col_c:
+
+                st.metric(
+                    "Modo",
+                    modo,
+                )
+
+
+            with col_d:
+
+                st.metric(
+                    "Tipo",
+                    (
+                        "Fechada"
+                        if voltar_inicio
+                        else
+                        "Aberta"
+                    ),
+                )
+
+
+            if atualizado:
+
+                st.caption(
+                    f"Última alteração: "
+                    f"{atualizado}"
+                )
+
+
+            col_abrir, col_recalcular = (
+                st.columns(
+                    2
+                )
+            )
+
+
+            # =================================================
+            # ABRIR
+            # =================================================
+
+            with col_abrir:
+
+                if st.button(
+                    "📂 Abrir rota",
+                    key=(
+                        f"abrir_"
+                        f"{rota_id}"
+                    ),
+                    use_container_width=True,
+                ):
+
+                    st.session_state.resultado_rota = (
+                        dados
+                    )
+
+                    st.session_state.rota_atual_id = (
+                        rota_id
+                    )
+
+                    st.session_state.rota_atual_nome = (
+                        nome
+                    )
+
+                    st.session_state.rota_aberta_salva = (
+                        True
+                    )
+
+                    st.session_state.pagina_app = (
+                        "nova"
+                    )
+
+                    st.rerun()
+
+
+            # =================================================
+            # RECALCULAR
+            # =================================================
+
+            with col_recalcular:
+
+                if st.button(
+                    "🔄 Recalcular",
+                    key=(
+                        f"recalcular_"
+                        f"{rota_id}"
+                    ),
+                    use_container_width=True,
+                ):
+
+                    try:
+
+                        if not locais_base:
+
+                            raise ValueError(
+                                "Esta rota não possui "
+                                "os locais originais salvos."
+                            )
+
+
+                        with st.spinner(
+                            "Recalculando a rota..."
+                        ):
+
+                            novo_resultado = (
+                                calcular_rota_a_partir_de_locais(
+                                    locais=locais_base,
+                                    voltar_inicio=voltar_inicio,
+                                    objetivo=objetivo,
+                                    modo=modo,
+                                )
+                            )
+
+
+                        st.session_state.resultado_rota = (
+                            novo_resultado
+                        )
+
+                        st.session_state.rota_atual_id = (
+                            rota_id
+                        )
+
+                        st.session_state.rota_atual_nome = (
+                            nome
+                        )
+
+                        st.session_state.rota_aberta_salva = (
+                            True
+                        )
+
+                        st.session_state.pagina_app = (
+                            "nova"
+                        )
+
+                        st.session_state.mensagem_sistema = {
+                            "tipo":
+                                "success",
+
+                            "texto":
+                                (
+                                    "Rota recalculada. "
+                                    "Confira o resultado e "
+                                    "clique em 'Atualizar rota salva' "
+                                    "se quiser armazenar a nova versão."
+                                ),
+                        }
+
+
+                        st.rerun()
+
+
+                    except Exception as e:
+
+                        st.error(
+                            f"Não foi possível "
+                            f"recalcular: {e}"
+                        )
+
+
+            # =================================================
+            # GERENCIAR
+            # =================================================
+
+            with st.expander(
+                "⚙️ Gerenciar rota"
+            ):
+
+                # =============================================
+                # RENOMEAR
+                # =============================================
+
+                with st.form(
+                    key=(
+                        f"form_renomear_"
+                        f"{rota_id}"
+                    )
+                ):
+
+                    novo_nome = st.text_input(
+                        "Novo nome",
+                        value=nome,
+                        key=(
+                            f"nome_"
+                            f"{rota_id}"
+                        ),
+                    )
+
+
+                    confirmar_renomear = (
+                        st.form_submit_button(
+                            "✏️ Renomear rota",
+                            use_container_width=True,
+                        )
+                    )
+
+
+                    if confirmar_renomear:
+
+                        try:
+
+                            renomear_rota_banco(
+                                rota_id,
+                                novo_nome,
+                            )
+
+
+                            if (
+                                st.session_state.rota_atual_id
+                                == rota_id
+                            ):
+
+                                st.session_state.rota_atual_nome = (
+                                    novo_nome.strip()
+                                )
+
+
+                            st.session_state.mensagem_sistema = {
+                                "tipo":
+                                    "success",
+
+                                "texto":
+                                    "Rota renomeada com sucesso.",
+                            }
+
+
+                            st.rerun()
+
+
+                        except Exception as e:
+
+                            st.error(
+                                f"Não foi possível "
+                                f"renomear: {e}"
+                            )
+
+
+                st.divider()
+
+
+                # =============================================
+                # EXCLUIR
+                # =============================================
+
+                confirmar_exclusao = st.checkbox(
+                    (
+                        "Confirmo que desejo "
+                        "excluir esta rota"
+                    ),
+                    key=(
+                        f"confirmar_excluir_"
+                        f"{rota_id}"
+                    ),
+                )
+
+
+                if st.button(
+                    "🗑️ Excluir definitivamente",
+                    key=(
+                        f"excluir_"
+                        f"{rota_id}"
+                    ),
+                    disabled=(
+                        not confirmar_exclusao
+                    ),
+                    use_container_width=True,
+                ):
+
+                    try:
+
+                        excluir_rota_banco(
+                            rota_id
+                        )
+
+
+                        if (
+                            st.session_state.rota_atual_id
+                            == rota_id
+                        ):
+
+                            limpar_rota_atual()
+
+
+                        st.session_state.mensagem_sistema = {
+                            "tipo":
+                                "success",
+
+                            "texto":
+                                "Rota excluída com sucesso.",
+                        }
+
+
+                        st.rerun()
+
+
+                    except Exception as e:
+
+                        st.error(
+                            f"Não foi possível "
+                            f"excluir: {e}"
+                        )
+
+
+# ============================================================
+# PÁGINA MINHAS ROTAS
+# ============================================================
+
+if (
+    st.session_state.pagina_app
+    == "minhas"
+):
+
+    renderizar_minhas_rotas()
+
+    st.stop()
+
+
+# ============================================================
+# PÁGINA NOVA ROTA
+# ============================================================
+
+if not ors_configurado:
+
+    st.error(
+        "OpenRouteService não configurado."
+    )
+
+
+if not supabase_configurado:
+
+    st.warning(
+        "O cálculo de rotas continuará funcionando, "
+        "mas não será possível salvar no Supabase."
+    )
+
+
+# ============================================================
+# ROTA SALVA ABERTA
+# ============================================================
+
+if (
+    st.session_state.rota_aberta_salva
+    and
+    st.session_state.resultado_rota
+):
+
+    st.subheader(
+        "📂 Rota salva"
+    )
+
+
+    st.write(
+        "Você abriu uma rota já salva. "
+        "As coordenadas armazenadas serão utilizadas, "
+        "sem necessidade de geocodificar os endereços novamente."
+    )
+
+
+    renderizar_resultado_rota(
+        st.session_state.resultado_rota
+    )
+
+
+    st.stop()
+
+
+# ============================================================
+# NOVA ROTA
+# ============================================================
+
+st.write(
+    "Informe os locais manualmente ou importe uma lista "
+    "por CSV/Excel. O sistema calculará a melhor sequência."
+)
+
 
 st.subheader(
     "📍 Locais da rota"
@@ -1514,15 +3525,16 @@ st.subheader(
 
 
 modo_entrada = st.radio(
-
     "Como deseja informar os locais?",
-
     [
         "Digitar manualmente",
         "Importar CSV/Excel",
     ],
-
     horizontal=True,
+    key=(
+        f"modo_entrada_"
+        f"{st.session_state.form_version}"
+    ),
 )
 
 
@@ -1538,31 +3550,38 @@ importacao_pronta = False
 
 
 # ============================================================
-# MODO MANUAL
+# MANUAL
 # ============================================================
 
 if modo_entrada == "Digitar manualmente":
 
     voltar_inicio = st.checkbox(
         "🔄 Retornar ao ponto inicial",
-        key="manual_voltar_inicio",
+        key=(
+            f"manual_voltar_inicio_"
+            f"{st.session_state.form_version}"
+        ),
     )
 
 
-    col_inicio, col_fim = st.columns(
-        2
+    col_inicio, col_fim = (
+        st.columns(
+            2
+        )
     )
 
 
     with col_inicio:
 
         ponto_inicio = campo_local(
-
-            "busca_ponto_inicio",
-
-            "📍 Ponto inicial",
-
-            "Digite pelo menos 3 letras...",
+            chave=(
+                f"busca_ponto_inicio_"
+                f"{st.session_state.form_version}"
+            ),
+            label="📍 Ponto inicial",
+            placeholder=(
+                "Digite pelo menos 3 letras..."
+            ),
         )
 
 
@@ -1571,9 +3590,7 @@ if modo_entrada == "Digitar manualmente":
         if voltar_inicio:
 
             st.text_input(
-
                 "🏁 Ponto final",
-
                 value=(
                     ponto_inicio[
                         "label"
@@ -1583,8 +3600,11 @@ if modo_entrada == "Digitar manualmente":
                     "Selecione primeiro "
                     "o ponto inicial"
                 ),
-
                 disabled=True,
+                key=(
+                    f"fim_desabilitado_"
+                    f"{st.session_state.form_version}"
+                ),
             )
 
 
@@ -1596,13 +3616,14 @@ if modo_entrada == "Digitar manualmente":
         else:
 
             ponto_fim = campo_local(
-
-                "busca_ponto_fim",
-
-                "🏁 Ponto final",
-
-                "Digite pelo menos 3 letras...",
-
+                chave=(
+                    f"busca_ponto_fim_"
+                    f"{st.session_state.form_version}"
+                ),
+                label="🏁 Ponto final",
+                placeholder=(
+                    "Digite pelo menos 3 letras..."
+                ),
                 focus=ponto_inicio,
             )
 
@@ -1637,6 +3658,10 @@ if modo_entrada == "Digitar manualmente":
         if st.button(
             "➕ Adicionar parada",
             use_container_width=True,
+            key=(
+                f"adicionar_parada_"
+                f"{st.session_state.form_version}"
+            ),
         ):
 
             st.session_state.num_paradas += 1
@@ -1647,15 +3672,16 @@ if modo_entrada == "Digitar manualmente":
     with col_remover:
 
         if st.button(
-
             "➖ Remover parada",
-
             disabled=(
                 st.session_state.num_paradas
                 <= 1
             ),
-
             use_container_width=True,
+            key=(
+                f"remover_parada_"
+                f"{st.session_state.form_version}"
+            ),
         ):
 
             st.session_state.num_paradas -= 1
@@ -1667,19 +3693,25 @@ if modo_entrada == "Digitar manualmente":
         st.session_state.num_paradas
     ):
 
-        paradas.append(
-
-            campo_local(
-
-                f"busca_parada_{i}",
-
-                f"Parada {i + 1}",
-
+        parada = campo_local(
+            chave=(
+                f"busca_parada_"
+                f"{st.session_state.form_version}_"
+                f"{i}"
+            ),
+            label=(
+                f"Parada {i + 1}"
+            ),
+            placeholder=(
                 "Digite um endereço "
-                "ou estabelecimento...",
+                "ou estabelecimento..."
+            ),
+            focus=ponto_inicio,
+        )
 
-                focus=ponto_inicio,
-            )
+
+        paradas.append(
+            parada
         )
 
 
@@ -1711,6 +3743,10 @@ else:
         ),
         file_name="modelo_paradas.csv",
         mime="text/csv",
+        key=(
+            f"download_modelo_"
+            f"{st.session_state.form_version}"
+        ),
     )
 
 
@@ -1720,6 +3756,10 @@ else:
             "csv",
             "xlsx",
         ],
+        key=(
+            f"arquivo_importado_"
+            f"{st.session_state.form_version}"
+        ),
     )
 
 
@@ -1738,7 +3778,9 @@ else:
         except Exception as e:
 
             st.error(
-                str(e)
+                str(
+                    e
+                )
             )
 
             st.stop()
@@ -1762,10 +3804,6 @@ else:
         )
 
 
-        # ====================================================
-        # BUSCA AUTOMÁTICA
-        # ====================================================
-
         resultados_por_endereco = []
 
 
@@ -1785,7 +3823,6 @@ else:
                         )
                     )
 
-
                 except Exception:
 
                     candidatos = []
@@ -1797,14 +3834,11 @@ else:
 
 
         nao_encontrados = [
-
             indice + 1
-
             for indice, candidatos
             in enumerate(
                 resultados_por_endereco
             )
-
             if not candidatos
         ]
 
@@ -1842,12 +3876,10 @@ else:
             endereco_original,
             candidatos,
         ) in enumerate(
-
             zip(
                 enderecos_importados,
                 resultados_por_endereco,
             ),
-
             start=1,
         ):
 
@@ -1864,15 +3896,14 @@ else:
                     None
                 )
 
-
                 continue
 
 
             posicao = st.selectbox(
-
-                f"{indice}. "
-                f"{endereco_original}",
-
+                (
+                    f"{indice}. "
+                    f"{endereco_original}"
+                ),
                 options=list(
                     range(
                         len(
@@ -1880,19 +3911,16 @@ else:
                         )
                     )
                 ),
-
                 index=0,
-
                 key=(
                     f"import_result_"
+                    f"{st.session_state.form_version}_"
                     f"{hash_arquivo}_"
                     f"{indice}"
                 ),
-
                 format_func=(
                     lambda posicao,
                     lista=candidatos:
-
                     lista[
                         posicao
                     ][
@@ -1909,13 +3937,8 @@ else:
             )
 
 
-        # ====================================================
-        # INÍCIO / FIM
-        # ====================================================
-
         if all(
             local is not None
-
             for local
             in locais_confirmados
         ):
@@ -1948,21 +3971,19 @@ else:
 
 
             indice_inicio = st.selectbox(
-
                 "Ponto inicial",
-
                 options=indices,
-
                 key=(
                     f"inicio_"
+                    f"{st.session_state.form_version}_"
                     f"{hash_arquivo}"
                 ),
-
                 format_func=(
                     lambda indice:
-
-                    f"{indice + 1}. "
-                    f"{locais_confirmados[indice]['label']}"
+                    (
+                        f"{indice + 1}. "
+                        f"{locais_confirmados[indice]['label']}"
+                    )
                 ),
             )
 
@@ -1975,11 +3996,10 @@ else:
 
 
             voltar_inicio = st.checkbox(
-
                 "🔄 Retornar ao ponto inicial",
-
                 key=(
                     f"voltar_"
+                    f"{st.session_state.form_version}_"
                     f"{hash_arquivo}"
                 ),
             )
@@ -1990,7 +4010,6 @@ else:
                 ponto_fim = (
                     ponto_inicio
                 )
-
 
                 indice_fim = None
 
@@ -2004,33 +4023,28 @@ else:
             else:
 
                 opcoes_fim = [
-
                     indice
-
                     for indice
                     in indices
-
                     if indice
                     != indice_inicio
                 ]
 
 
                 indice_fim = st.selectbox(
-
                     "Ponto final",
-
                     options=opcoes_fim,
-
                     key=(
                         f"fim_"
+                        f"{st.session_state.form_version}_"
                         f"{hash_arquivo}"
                     ),
-
                     format_func=(
                         lambda indice:
-
-                        f"{indice + 1}. "
-                        f"{locais_confirmados[indice]['label']}"
+                        (
+                            f"{indice + 1}. "
+                            f"{locais_confirmados[indice]['label']}"
+                        )
                     ),
                 )
 
@@ -2050,8 +4064,7 @@ else:
             if (
                 not voltar_inicio
                 and
-                indice_fim
-                is not None
+                indice_fim is not None
             ):
 
                 excluir.add(
@@ -2060,14 +4073,11 @@ else:
 
 
             paradas = [
-
                 local
-
                 for indice, local
                 in enumerate(
                     locais_confirmados
                 )
-
                 if indice
                 not in excluir
             ]
@@ -2110,38 +4120,42 @@ st.subheader(
 )
 
 
-col_objetivo, col_modo = st.columns(
-    2
+col_objetivo, col_modo = (
+    st.columns(
+        2
+    )
 )
 
 
 with col_objetivo:
 
     objetivo = st.radio(
-
         "Otimizar por",
-
         [
             "Menor distância",
             "Menor tempo",
         ],
-
         horizontal=True,
+        key=(
+            f"objetivo_"
+            f"{st.session_state.form_version}"
+        ),
     )
 
 
 with col_modo:
 
     modo = st.radio(
-
         "Modo de otimização",
-
         [
             "Rápido",
             "Preciso",
         ],
-
         horizontal=True,
+        key=(
+            f"modo_"
+            f"{st.session_state.form_version}"
+        ),
     )
 
 
@@ -2187,18 +4201,18 @@ calcular = st.button(
     "🚗 Calcular melhor rota",
     type="primary",
     use_container_width=True,
+    key=(
+        f"calcular_"
+        f"{st.session_state.form_version}"
+    ),
 )
 
 
 # ============================================================
-# RESULTADO
+# EXECUTA CÁLCULO
 # ============================================================
 
 if calcular:
-
-    # ========================================================
-    # VALIDAÇÕES
-    # ========================================================
 
     if not ors_configurado:
 
@@ -2247,12 +4261,9 @@ if calcular:
 
 
     paradas_validas = [
-
         parada
-
         for parada
         in paradas
-
         if parada is not None
     ]
 
@@ -2272,7 +4283,7 @@ if calcular:
 
 
     # ========================================================
-    # LOCAIS
+    # MONTA LOCAIS
     # ========================================================
 
     locais = [
@@ -2316,14 +4327,12 @@ if calcular:
     for local in locais:
 
         chave = (
-
             round(
                 local[
                     "latitude"
                 ],
                 6,
             ),
-
             round(
                 local[
                     "longitude"
@@ -2352,12 +4361,23 @@ if calcular:
     # LIMITES
     # ========================================================
 
+    max_locais = (
+        49
+        if voltar_inicio
+        else
+        50
+    )
+
+
     if len(
         locais
-    ) > 50:
+    ) > max_locais:
 
         st.error(
-            "O limite atual é de 50 locais."
+            f"Esta rota possui "
+            f"{len(locais)} locais. "
+            f"O limite atual é "
+            f"{max_locais}."
         )
 
         st.stop()
@@ -2376,167 +4396,60 @@ if calcular:
 
         st.error(
             "A quantidade de locais ultrapassa "
-            "o limite da Matrix API."
+            "o limite atual da Matrix API."
         )
 
         st.stop()
 
 
     # ========================================================
-    # COORDENADAS
-    # ========================================================
-
-    coordenadas = tuple(
-
-        (
-            local[
-                "latitude"
-            ],
-
-            local[
-                "longitude"
-            ],
-        )
-
-        for local
-        in locais
-    )
-
-
-    start_idx = 0
-
-
-    end_idx = (
-        0
-        if voltar_inicio
-        else
-        len(
-            locais
-        ) - 1
-    )
-
-
-    # ========================================================
-    # PROCESSAMENTO
+    # CALCULA
     # ========================================================
 
     try:
 
         with st.spinner(
-            "Calculando distâncias e tempos..."
+            "Calculando distâncias, tempos "
+            "e procurando a melhor rota..."
         ):
 
-            matrix_data = (
-                obter_matrix_cache_v2(
-                    coordenadas,
-                    ORS_KEY,
+            resultado_rota = (
+                calcular_rota_a_partir_de_locais(
+                    locais=locais,
+                    voltar_inicio=voltar_inicio,
+                    objetivo=objetivo,
+                    modo=modo,
                 )
             )
 
 
-        if not isinstance(
-            matrix_data,
-            dict,
-        ):
-
-            st.error(
-                "A Matrix API retornou "
-                "um formato incompatível."
-            )
-
-            st.stop()
-
-
-        if (
-            "distancias"
-            not in matrix_data
-            or
-            "duracoes"
-            not in matrix_data
-        ):
-
-            st.error(
-                "A Matrix API não retornou "
-                "distâncias e tempos."
-            )
-
-            st.stop()
-
-
-        matrix_otimizacao = (
-            matrix_data[
-                "distancias"
-            ]
-            if objetivo
-            == "Menor distância"
-            else
-            matrix_data[
-                "duracoes"
-            ]
+        st.session_state.resultado_rota = (
+            resultado_rota
         )
 
 
-        with st.spinner(
-            "Procurando a melhor rota..."
-        ):
+        st.session_state.rota_atual_id = None
 
-            resultado = otimizar_rota(
-                matrix_m=matrix_otimizacao,
-                start_idx=start_idx,
-                end_idx=end_idx,
-                modo=modo,
-            )
+        st.session_state.rota_atual_nome = None
+
+        st.session_state.rota_aberta_salva = False
 
 
-        locais_ordenados = [
-
-            locais[
-                indice
-            ]
-
-            for indice
-            in resultado[
-                "route"
-            ]
-        ]
-
-
-        coordenadas_ordenadas = tuple(
-
-            (
-                local[
-                    "latitude"
-                ],
-
-                local[
-                    "longitude"
-                ],
-            )
-
-            for local
-            in locais_ordenados
+        st.success(
+            "Rota calculada com sucesso."
         )
-
-
-        with st.spinner(
-            "Montando a rota pelas ruas..."
-        ):
-
-            rota_real = (
-                obter_directions_cache(
-                    coordenadas_ordenadas,
-                    ORS_KEY,
-                )
-            )
 
 
     except (
         ORSError,
         RouteOptimizationError,
+        ValueError,
     ) as e:
 
         st.error(
-            str(e)
+            str(
+                e
+            )
         )
 
         st.stop()
@@ -2556,483 +4469,14 @@ if calcular:
         st.stop()
 
 
-    # ========================================================
-    # MÉTRICAS
-    # ========================================================
+# ============================================================
+# RESULTADO PERSISTIDO NA SESSÃO
+# ============================================================
 
-    distancia_km = (
-        rota_real[
-            "distancia_m"
-        ]
-        / 1000
-    )
+if st.session_state.resultado_rota:
 
+    st.divider()
 
-    minutos_total = round(
-        rota_real[
-            "duracao_s"
-        ]
-        / 60
-    )
-
-
-    horas, minutos = divmod(
-        minutos_total,
-        60,
-    )
-
-
-    tempo_texto = (
-        f"{horas}h "
-        f"{minutos:02d}min"
-        if horas
-        else
-        f"{minutos} min"
-    )
-
-
-    st.success(
-        "Rota calculada com sucesso."
-    )
-
-
-    col1, col2, col3, col4 = (
-        st.columns(
-            4
-        )
-    )
-
-
-    with col1:
-
-        st.metric(
-            "Distância total",
-            f"{distancia_km:.2f} km",
-        )
-
-
-    with col2:
-
-        st.metric(
-            "Tempo estimado",
-            tempo_texto,
-        )
-
-
-    with col3:
-
-        st.metric(
-            "Locais",
-            len(
-                locais
-            ),
-        )
-
-
-    with col4:
-
-        st.metric(
-            "Otimizado por",
-            (
-                "Distância"
-                if objetivo
-                == "Menor distância"
-                else
-                "Tempo"
-            ),
-        )
-
-
-    st.caption(
-        f"Modo utilizado: "
-        f"**{modo}**"
-    )
-
-
-    # ========================================================
-    # STATUS
-    # ========================================================
-
-    if (
-        resultado[
-            "status"
-        ]
-        == "ÓTIMA COMPROVADA"
-    ):
-
-        st.success(
-            "🏆 Rota ótima "
-            "matematicamente comprovada."
-        )
-
-
-    elif (
-        resultado[
-            "gap_percent"
-        ]
-        is not None
-    ):
-
-        st.info(
-            "🎯 Melhor rota encontrada. "
-            f"Gap máximo restante: "
-            f"{resultado['gap_percent']:.3f}%."
-        )
-
-
-    else:
-
-        st.info(
-            "⚡ Rota otimizada "
-            "em modo rápido."
-        )
-
-
-    # ========================================================
-    # ORDEM DA ROTA
-    # ========================================================
-
-    st.subheader(
-        "📋 Ordem da rota"
-    )
-
-
-    lista_exibir = (
-        locais_ordenados[
-            :-1
-        ]
-        if voltar_inicio
-        else
-        locais_ordenados
-    )
-
-
-    for numero, local in enumerate(
-        lista_exibir,
-        start=1,
-    ):
-
-        st.write(
-            f"**{numero}.** "
-            f"{local['nome']}"
-        )
-
-
-    if voltar_inicio:
-
-        st.write(
-            f"**{len(lista_exibir) + 1}.** "
-            f"{locais_ordenados[-1]['nome']} "
-            f"_(retorno)_"
-        )
-
-
-    # ========================================================
-    # MAPA
-    # ========================================================
-
-    mapa = criar_mapa(
-
-        geometry=(
-            rota_real[
-                "geometry"
-            ]
-        ),
-
-        locais_ordenados=(
-            locais_ordenados
-        ),
-
-        rota_fechada=(
-            voltar_inicio
-        ),
-
-        distancia_km=(
-            distancia_km
-        ),
-
-        tempo_texto=(
-            tempo_texto
-        ),
-
-        objetivo=(
-            objetivo
-        ),
-    )
-
-
-    # ========================================================
-    # EXPORTAÇÃO
-    # ========================================================
-
-    st.subheader(
-        "💾 Exportar rota"
-    )
-
-
-    dataframe_exportacao = (
-        dataframe_rota_otimizada(
-            locais_ordenados,
-            voltar_inicio,
-        )
-    )
-
-
-    csv_exportacao = (
-        gerar_csv_rota(
-            dataframe_exportacao
-        )
-    )
-
-
-    excel_exportacao = (
-        gerar_excel_rota(
-
-            dataframe_exportacao,
-
-            distancia_km,
-
-            tempo_texto,
-
-            objetivo,
-
-            modo,
-
-            voltar_inicio,
-        )
-    )
-
-
-    html_mapa = (
-        gerar_html_mapa(
-            mapa
-        )
-    )
-
-
-    col_csv, col_excel, col_mapa = (
-        st.columns(
-            3
-        )
-    )
-
-
-    with col_csv:
-
-        st.download_button(
-
-            "⬇️ Baixar rota em CSV",
-
-            data=(
-                csv_exportacao
-            ),
-
-            file_name=(
-                "rota_otimizada.csv"
-            ),
-
-            mime=(
-                "text/csv"
-            ),
-
-            use_container_width=True,
-        )
-
-
-    with col_excel:
-
-        st.download_button(
-
-            "⬇️ Baixar relatório em Excel",
-
-            data=(
-                excel_exportacao
-            ),
-
-            file_name=(
-                "rota_otimizada.xlsx"
-            ),
-
-            mime=(
-                "application/vnd.openxmlformats-officedocument."
-                "spreadsheetml.sheet"
-            ),
-
-            use_container_width=True,
-        )
-
-
-    with col_mapa:
-
-        st.download_button(
-
-            "🗺️ Baixar mapa interativo",
-
-            data=(
-                html_mapa
-            ),
-
-            file_name=(
-                "mapa_rota_otimizada.html"
-            ),
-
-            mime=(
-                "text/html"
-            ),
-
-            use_container_width=True,
-        )
-
-
-    st.caption(
-        "O mapa é exportado em HTML interativo "
-        "com a rota, marcadores numerados, zoom "
-        "e resumo da viagem."
-    )
-
-
-    # ========================================================
-    # GOOGLE MAPS
-    # ========================================================
-
-    st.subheader(
-        "🧭 Navegação no Google Maps"
-    )
-
-
-    st.caption(
-        "A ordem foi calculada pelo Otimizador de Rotas. "
-        "O Google Maps é utilizado apenas para navegação."
-    )
-
-
-    trechos_google = (
-        dividir_rota_google_maps(
-
-            locais_ordenados,
-
-            max_pontos_por_trecho=5,
-        )
-    )
-
-
-    if len(
-        trechos_google
-    ) == 1:
-
-        st.link_button(
-
-            "🧭 Abrir rota no Google Maps",
-
-            gerar_url_google_maps(
-                trechos_google[
-                    0
-                ]
-            ),
-
-            use_container_width=True,
-        )
-
-
-        with st.expander(
-            "Opções avançadas de navegação"
-        ):
-
-            st.link_button(
-
-                "📍 Abrir usando coordenadas",
-
-                gerar_url_google_maps(
-
-                    trechos_google[
-                        0
-                    ],
-
-                    usar_coordenadas=True,
-                ),
-
-                use_container_width=True,
-            )
-
-
-    else:
-
-        st.info(
-            f"A rota foi dividida em "
-            f"{len(trechos_google)} trechos."
-        )
-
-
-        for numero_trecho, trecho in enumerate(
-            trechos_google,
-            start=1,
-        ):
-
-            with st.expander(
-
-                (
-                    f"Trecho {numero_trecho}: "
-                    f"{trecho[0]['nome']} → "
-                    f"{trecho[-1]['nome']}"
-                ),
-
-                expanded=(
-                    numero_trecho == 1
-                ),
-            ):
-
-                for numero_local, local in enumerate(
-                    trecho,
-                    start=1,
-                ):
-
-                    st.write(
-                        f"**{numero_local}.** "
-                        f"{local['nome']}"
-                    )
-
-
-                st.link_button(
-
-                    (
-                        f"🧭 Abrir trecho "
-                        f"{numero_trecho} "
-                        f"no Google Maps"
-                    ),
-
-                    gerar_url_google_maps(
-                        trecho
-                    ),
-
-                    use_container_width=True,
-                )
-
-
-                st.link_button(
-
-                    "📍 Alternativa por coordenadas",
-
-                    gerar_url_google_maps(
-                        trecho,
-                        usar_coordenadas=True,
-                    ),
-
-                    use_container_width=True,
-                )
-
-
-    # ========================================================
-    # MAPA NA TELA
-    # ========================================================
-
-    st.subheader(
-        "🗺️ Mapa da rota"
-    )
-
-
-    st_folium(
-        mapa,
-        height=600,
-        use_container_width=True,
-        returned_objects=[],
+    renderizar_resultado_rota(
+        st.session_state.resultado_rota
     )
