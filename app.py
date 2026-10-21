@@ -238,6 +238,11 @@ init_state(
 )
 
 init_state(
+    "local_cadastro_aberto",
+    False,
+)
+
+init_state(
     "local_endereco_editando_id",
     None,
 )
@@ -2573,7 +2578,7 @@ def calcular_rota_a_partir_de_locais(
 
     return {
         "versao":
-            5,
+            6,
 
         "voltar_inicio":
             bool(
@@ -4874,6 +4879,11 @@ def renderizar_locais_salvos():
             border=True
         ):
 
+            st.markdown(
+                "### Alterar endereço"
+            )
+
+
             st.write(
                 "**Endereço atual:**"
             )
@@ -5006,29 +5016,25 @@ def renderizar_locais_salvos():
                     st.rerun()
 
 
-        st.caption(
-            "Durante a alteração de endereço, "
-            "o formulário de novo local fica oculto "
-            "para evitar conflito entre campos de busca."
-        )
-
-
     # ========================================================
-    # CADASTRAR NOVO LOCAL
-    # Apenas quando NÃO estiver alterando endereço.
+    # NOVO LOCAL
     # ========================================================
 
-    else:
+    elif st.session_state.local_cadastro_aberto:
 
-        versao = (
-            st.session_state.local_form_version
-        )
-
-
-        with st.expander(
-            "➕ Cadastrar novo local",
-            expanded=False,
+        with st.container(
+            border=True
         ):
+
+            st.markdown(
+                "### ➕ Cadastrar novo local"
+            )
+
+
+            versao = (
+                st.session_state.local_form_version
+            )
+
 
             nome_novo = st.text_input(
                 "Nome do cliente/local",
@@ -5042,6 +5048,9 @@ def renderizar_locais_salvos():
             )
 
 
+            # IMPORTANTE:
+            # O searchbox está diretamente no container,
+            # NÃO dentro de st.expander.
             endereco_novo = campo_local(
                 chave=(
                     f"novo_local_endereco_"
@@ -5069,67 +5078,132 @@ def renderizar_locais_salvos():
 
             if endereco_novo:
 
-                st.caption(
+                st.success(
                     "📌 Endereço selecionado: "
                     f"{endereco_novo['label']}"
                 )
 
 
-            if st.button(
-                "💾 Salvar local",
-                type="primary",
-                use_container_width=True,
-                key=(
-                    f"salvar_novo_local_"
-                    f"{versao}"
-                ),
-            ):
+            col_salvar_novo, col_cancelar_novo = (
+                st.columns(
+                    2
+                )
+            )
 
-                try:
 
-                    nome_final = (
-                        nome_novo.strip()
-                        or
-                        nome_padrao_local(
-                            endereco_novo
+            with col_salvar_novo:
+
+                if st.button(
+                    "💾 Salvar local",
+                    type="primary",
+                    use_container_width=True,
+                    key=(
+                        f"salvar_novo_local_"
+                        f"{versao}"
+                    ),
+                ):
+
+                    try:
+
+                        if not endereco_novo:
+
+                            raise ValueError(
+                                "Selecione um endereço."
+                            )
+
+
+                        nome_final = (
+                            nome_novo.strip()
                             or
-                            {}
+                            nome_padrao_local(
+                                endereco_novo
+                            )
                         )
-                    )
 
 
-                    registro = salvar_local_banco(
-                        nome_final,
-                        endereco_novo,
-                        observacao_nova,
-                    )
+                        registro = salvar_local_banco(
+                            nome_final,
+                            endereco_novo,
+                            observacao_nova,
+                        )
 
+
+                        st.session_state.local_form_version += 1
+
+                        st.session_state.local_cadastro_aberto = (
+                            False
+                        )
+
+
+                        st.session_state.mensagem_sistema = {
+                            "tipo":
+                                "success",
+
+                            "texto":
+                                (
+                                    f"Local "
+                                    f"'{registro['nome']}' "
+                                    f"salvo com sucesso."
+                                ),
+                        }
+
+
+                        st.rerun()
+
+
+                    except Exception as e:
+
+                        st.error(
+                            "Não foi possível salvar "
+                            f"o local: {e}"
+                        )
+
+
+            with col_cancelar_novo:
+
+                if st.button(
+                    "Cancelar cadastro",
+                    use_container_width=True,
+                    key=(
+                        f"cancelar_novo_local_"
+                        f"{versao}"
+                    ),
+                ):
 
                     st.session_state.local_form_version += 1
 
-
-                    st.session_state.mensagem_sistema = {
-                        "tipo":
-                            "success",
-
-                        "texto":
-                            (
-                                f"Local "
-                                f"'{registro['nome']}' "
-                                f"salvo com sucesso."
-                            ),
-                    }
+                    st.session_state.local_cadastro_aberto = (
+                        False
+                    )
 
 
                     st.rerun()
 
 
-                except Exception as e:
+    # ========================================================
+    # BOTÃO ABRIR CADASTRO
+    # ========================================================
 
-                    st.error(
-                        "Não foi possível salvar "
-                        f"o local: {e}"
-                    )
+    else:
+
+        if st.button(
+            "➕ Cadastrar novo local",
+            type="primary",
+            use_container_width=True,
+            key="abrir_cadastro_novo_local",
+        ):
+
+            st.session_state.local_cadastro_aberto = (
+                True
+            )
+
+            st.session_state.local_endereco_editando_id = (
+                None
+            )
+
+            st.session_state.local_form_version += 1
+
+            st.rerun()
 
 
     # ========================================================
@@ -5367,6 +5441,11 @@ def renderizar_locais_salvos():
                     use_container_width=True,
                 ):
 
+                    st.session_state.local_cadastro_aberto = (
+                        False
+                    )
+
+
                     st.session_state.local_endereco_editando_id = (
                         local_id
                     )
@@ -5378,6 +5457,8 @@ def renderizar_locais_salvos():
                     st.rerun()
 
 
+            # Aqui o expander contém apenas widgets nativos.
+            # NÃO contém mais st_searchbox.
             with st.expander(
                 "⚙️ Editar nome, observação ou excluir"
             ):
