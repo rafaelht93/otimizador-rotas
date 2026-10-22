@@ -18,6 +18,19 @@ DEFAULT_TIMEOUT = 20
 MAX_RETRIES = 4
 INITIAL_BACKOFF = 1.0
 
+# Limites usados para trabalhar com a API pública do ORS.
+# A Matrix aceita até 3.500 combinações origem x destino
+# por requisição. Usamos blocos conservadores de 50 x 50.
+MATRIX_MAX_PAIRS_PER_REQUEST = 3500
+MATRIX_BLOCK_SIZE = 50
+
+# O Directions aceita no máximo 50 waypoints por requisição.
+DIRECTIONS_MAX_WAYPOINTS = 50
+
+# Limite técnico atual do produto.
+# O app trabalha com até 100 locais únicos por rota.
+MAX_SUPPORTED_LOCATIONS = 100
+
 
 # ============================================================
 # EXCEÇÃO
@@ -497,45 +510,106 @@ def geocodificar(
 
 
 # ============================================================
-# MATRIX API
+# COORDENADAS
 # ============================================================
 
-def obter_matriz_distancias(
+def _normalizar_coordenadas(
     coordenadas,
-    api_key,
-    profile="driving-car",
 ):
     """
-    Retorna DUAS matrizes:
+    Recebe coordenadas no formato usado pelo app:
 
-    distancias:
-        metros
+        (latitude, longitude)
 
-    duracoes:
-        segundos
+    e devolve uma lista de tuplas float no mesmo formato.
     """
 
-    if not coordenadas:
-        raise ORSError(
-            "Nenhuma coordenada foi informada."
+    try:
+        coordenadas = list(
+            coordenadas
         )
 
-    n = len(coordenadas)
-
-    if n * n > 3500:
+    except TypeError as e:
         raise ORSError(
-            f"{n} pontos geram {n*n} pares "
-            "na matriz, acima do limite atual."
+            "As coordenadas informadas são inválidas."
+        ) from e
+
+    normalizadas = []
+
+    for indice, coordenada in enumerate(
+        coordenadas,
+        start=1,
+    ):
+
+        if (
+            coordenada is None
+            or len(coordenada) < 2
+        ):
+            raise ORSError(
+                f"A coordenada do ponto {indice} é inválida."
+            )
+
+        try:
+            lat = float(
+                coordenada[0]
+            )
+
+            lon = float(
+                coordenada[1]
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ) as e:
+            raise ORSError(
+                f"A coordenada do ponto {indice} é inválida."
+            ) from e
+
+        if not (
+            -90 <= lat <= 90
+            and
+            -180 <= lon <= 180
+        ):
+            raise ORSError(
+                f"A coordenada do ponto {indice} está fora "
+                "dos limites válidos de latitude/longitude."
+            )
+
+        normalizadas.append(
+            (
+                lat,
+                lon,
+            )
         )
+
+    return normalizadas
+
+
+# ============================================================
+# MATRIX - REQUISIÇÃO ÚNICA
+# ============================================================
+
+def _executar_matrix_request(
+    coordenadas,
+    api_key,
+    profile,
+    source_indices=None,
+    destination_indices=None,
+):
+    """
+    Executa uma única chamada à Matrix API.
+
+    coordenadas devem estar em (latitude, longitude).
+    source_indices e destination_indices são índices relativos
+    à lista coordenadas enviada nesta requisição.
+    """
 
     url = (
         f"{ORS_BASE_URL}"
         f"/matrix/"
         f"{profile}"
     )
-
-    # ORS usa:
-    # [longitude, latitude]
 
     locations = [
         [
@@ -554,6 +628,20 @@ def obter_matriz_distancias(
         ],
         "units": "m",
     }
+
+    if source_indices is not None:
+        payload["sources"] = [
+            str(indice)
+            for indice
+            in source_indices
+        ]
+
+    if destination_indices is not None:
+        payload["destinations"] = [
+            str(indice)
+            for indice
+            in destination_indices
+        ]
 
     response = _request_with_retries(
         "POST",
@@ -574,7 +662,6 @@ def obter_matriz_distancias(
             "uma resposta inválida."
         ) from e
 
-
     distances = data.get(
         "distances"
     )
@@ -582,7 +669,6 @@ def obter_matriz_distancias(
     durations = data.get(
         "durations"
     )
-
 
     if distances is None:
         raise ORSError(
@@ -596,7 +682,6 @@ def obter_matriz_distancias(
             "os tempos de deslocamento."
         )
 
-
     return {
         "distancias": distances,
         "duracoes": durations,
@@ -604,25 +689,298 @@ def obter_matriz_distancias(
 
 
 # ============================================================
-# DIRECTIONS API
+# MATRIX - MONTA BLOCO
 # ============================================================
 
-def obter_rota_completa(
+def _obter_bloco_matrix(
+    coordenadas,
+    source_indices,
+    destination_indices,
+    api_key,
+    profile,
+):
+    """
+    Monta uma requisição Matrix apenas com os pontos necessários
+    para um bloco origem x destino.
+
+    Isso permite montar matrizes maiores sem ultrapassar o limite
+    de combinações por chamada da API pública.
+    """
+
+    indices_unicos = []
+    indice_local = {}
+
+    for indice_global in (
+        list(source_indices)
+        + list(destination_indices)
+    ):
+
+        if indice_global not in indice_local:
+            indice_local[indice_global] = len(
+                indices_unicos
+            )
+
+            indices_unicos.append(
+                indice_global
+            )
+
+    coordenadas_request = [
+        coordenadas[indice]
+        for indice
+        in indices_unicos
+    ]
+
+    sources_request = [
+        indice_local[indice]
+        for indice
+        in source_indices
+    ]
+
+    destinations_request = [
+        indice_local[indice]
+        for indice
+        in destination_indices
+    ]
+
+    return _executar_matrix_request(
+        coordenadas=coordenadas_request,
+        api_key=api_key,
+        profile=profile,
+        source_indices=sources_request,
+        destination_indices=destinations_request,
+    )
+
+
+# ============================================================
+# MATRIX API
+# ============================================================
+
+def obter_matriz_distancias(
     coordenadas,
     api_key,
     profile="driving-car",
 ):
+    """
+    Retorna DUAS matrizes completas:
+
+    distancias:
+        metros
+
+    duracoes:
+        segundos
+
+    Quando n x n permanece dentro do limite de
+    3.500 combinações, a API é chamada uma única vez.
+
+    Para matrizes maiores, o cálculo é dividido em blocos
+    de até 50 origens x 50 destinos e os blocos são reunidos
+    novamente em uma única matriz.
+
+    O produto está preparado atualmente para até 100 locais.
+    """
+
+    coordenadas = _normalizar_coordenadas(
+        coordenadas
+    )
+
+    if not coordenadas:
+        raise ORSError(
+            "Nenhuma coordenada foi informada."
+        )
+
+    n = len(
+        coordenadas
+    )
+
+    if n > MAX_SUPPORTED_LOCATIONS:
+        raise ORSError(
+            f"O sistema está preparado para até "
+            f"{MAX_SUPPORTED_LOCATIONS} locais por rota."
+        )
+
+    # ========================================================
+    # MATRIZ CABE EM UMA ÚNICA REQUISIÇÃO
+    # ========================================================
+
+    if n * n <= MATRIX_MAX_PAIRS_PER_REQUEST:
+
+        return _executar_matrix_request(
+            coordenadas=coordenadas,
+            api_key=api_key,
+            profile=profile,
+        )
+
+    # ========================================================
+    # MATRIZ EM BLOCOS
+    # ========================================================
+
+    distancias = [
+        [None for _ in range(n)]
+        for _ in range(n)
+    ]
+
+    duracoes = [
+        [None for _ in range(n)]
+        for _ in range(n)
+    ]
+
+    blocos = [
+        list(
+            range(
+                inicio,
+                min(
+                    inicio + MATRIX_BLOCK_SIZE,
+                    n,
+                ),
+            )
+        )
+        for inicio
+        in range(
+            0,
+            n,
+            MATRIX_BLOCK_SIZE,
+        )
+    ]
+
+    for source_indices in blocos:
+
+        for destination_indices in blocos:
+
+            quantidade_pares = (
+                len(source_indices)
+                * len(destination_indices)
+            )
+
+            if (
+                quantidade_pares
+                > MATRIX_MAX_PAIRS_PER_REQUEST
+            ):
+                raise ORSError(
+                    "Um bloco da matriz ultrapassou "
+                    "o limite de combinações permitido."
+                )
+
+            bloco = _obter_bloco_matrix(
+                coordenadas=coordenadas,
+                source_indices=source_indices,
+                destination_indices=destination_indices,
+                api_key=api_key,
+                profile=profile,
+            )
+
+            bloco_distancias = bloco[
+                "distancias"
+            ]
+
+            bloco_duracoes = bloco[
+                "duracoes"
+            ]
+
+            if (
+                len(bloco_distancias)
+                != len(source_indices)
+                or
+                len(bloco_duracoes)
+                != len(source_indices)
+            ):
+                raise ORSError(
+                    "A Matrix API retornou um bloco "
+                    "com dimensões inesperadas."
+                )
+
+            for linha_local, origem_global in enumerate(
+                source_indices
+            ):
+
+                linha_distancias = bloco_distancias[
+                    linha_local
+                ]
+
+                linha_duracoes = bloco_duracoes[
+                    linha_local
+                ]
+
+                if (
+                    len(linha_distancias)
+                    != len(destination_indices)
+                    or
+                    len(linha_duracoes)
+                    != len(destination_indices)
+                ):
+                    raise ORSError(
+                        "A Matrix API retornou um bloco "
+                        "com dimensões inesperadas."
+                    )
+
+                for coluna_local, destino_global in enumerate(
+                    destination_indices
+                ):
+
+                    distancias[
+                        origem_global
+                    ][
+                        destino_global
+                    ] = linha_distancias[
+                        coluna_local
+                    ]
+
+                    duracoes[
+                        origem_global
+                    ][
+                        destino_global
+                    ] = linha_duracoes[
+                        coluna_local
+                    ]
+
+    # ========================================================
+    # VALIDA RESULTADO FINAL
+    # ========================================================
+
+    for i in range(n):
+
+        for j in range(n):
+
+            if (
+                distancias[i][j] is None
+                or
+                duracoes[i][j] is None
+            ):
+                raise ORSError(
+                    "Não foi possível calcular todos os "
+                    "trechos da matriz da rota."
+                )
+
+    return {
+        "distancias": distancias,
+        "duracoes": duracoes,
+    }
+
+
+# ============================================================
+# DIRECTIONS - REQUISIÇÃO ÚNICA
+# ============================================================
+
+def _executar_directions_request(
+    coordenadas,
+    api_key,
+    profile,
+):
+    """
+    Executa uma única chamada ao Directions.
+
+    A lista deve conter entre 2 e 50 pontos.
+    """
 
     if len(coordenadas) < 2:
         raise ORSError(
-            "A rota precisa ter pelo menos "
+            "Um trecho da rota precisa ter pelo menos "
             "dois pontos."
         )
 
-    if len(coordenadas) > 50:
+    if len(coordenadas) > DIRECTIONS_MAX_WAYPOINTS:
         raise ORSError(
-            "A rota possui mais de "
-            "50 pontos."
+            "Um trecho da rota ultrapassou o limite "
+            "de 50 pontos do Directions."
         )
 
     url = (
@@ -666,7 +1024,6 @@ def obter_rota_completa(
             "uma resposta inválida."
         ) from e
 
-
     try:
 
         feature = data[
@@ -696,14 +1053,232 @@ def obter_rota_completa(
             "não contém os dados esperados."
         ) from e
 
+    if not geometry:
+        raise ORSError(
+            "A Directions API retornou uma rota "
+            "sem geometria."
+        )
+
+    try:
+        distancia_m = float(
+            summary["distance"]
+        )
+
+        duracao_s = float(
+            summary["duration"]
+        )
+
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as e:
+        raise ORSError(
+            "A Directions API retornou um resumo "
+            "de rota inválido."
+        ) from e
+
+    return {
+        "distancia_m": distancia_m,
+        "duracao_s": duracao_s,
+        "geometry": geometry,
+        "raw": data,
+    }
+
+
+# ============================================================
+# DIRECTIONS - JUNTA GEOMETRIAS
+# ============================================================
+
+def _juntar_geometry(
+    geometry_total,
+    geometry_trecho,
+):
+
+    if not geometry_trecho:
+        return geometry_total
+
+    if not geometry_total:
+        geometry_total.extend(
+            geometry_trecho
+        )
+        return geometry_total
+
+    if (
+        geometry_total[-1]
+        == geometry_trecho[0]
+    ):
+        geometry_total.extend(
+            geometry_trecho[1:]
+        )
+
+    else:
+        geometry_total.extend(
+            geometry_trecho
+        )
+
+    return geometry_total
+
+
+# ============================================================
+# DIRECTIONS API
+# ============================================================
+
+def obter_rota_completa(
+    coordenadas,
+    api_key,
+    profile="driving-car",
+):
+    """
+    Obtém a geometria, a distância e a duração da rota completa.
+
+    O Directions público aceita até 50 pontos por chamada.
+
+    Quando a sequência possui mais pontos, ela é dividida em
+    trechos sobrepostos:
+
+        trecho 1: pontos 1..50
+        trecho 2: pontos 50..99
+        trecho 3: pontos 99.....
+
+    O último ponto de um trecho é repetido como primeiro ponto
+    do trecho seguinte, garantindo continuidade da rota.
+
+    Isso permite, por exemplo:
+
+        - rota aberta com 100 locais;
+        - rota fechada com 100 locais + retorno ao início
+          (101 coordenadas na sequência final).
+    """
+
+    coordenadas = _normalizar_coordenadas(
+        coordenadas
+    )
+
+    if len(coordenadas) < 2:
+        raise ORSError(
+            "A rota precisa ter pelo menos "
+            "dois pontos."
+        )
+
+    # ========================================================
+    # CABE EM UMA ÚNICA CHAMADA
+    # ========================================================
+
+    if (
+        len(coordenadas)
+        <= DIRECTIONS_MAX_WAYPOINTS
+    ):
+
+        return _executar_directions_request(
+            coordenadas=coordenadas,
+            api_key=api_key,
+            profile=profile,
+        )
+
+    # ========================================================
+    # ROTA EM TRECHOS
+    # ========================================================
+
+    distancia_total = 0.0
+    duracao_total = 0.0
+    geometry_total = []
+    partes_raw = []
+
+    inicio = 0
+
+    total_pontos = len(
+        coordenadas
+    )
+
+    while inicio < total_pontos - 1:
+
+        fim_exclusivo = min(
+            inicio + DIRECTIONS_MAX_WAYPOINTS,
+            total_pontos,
+        )
+
+        trecho_coordenadas = coordenadas[
+            inicio:
+            fim_exclusivo
+        ]
+
+        if len(trecho_coordenadas) < 2:
+            break
+
+        resultado_trecho = (
+            _executar_directions_request(
+                coordenadas=trecho_coordenadas,
+                api_key=api_key,
+                profile=profile,
+            )
+        )
+
+        distancia_total += resultado_trecho[
+            "distancia_m"
+        ]
+
+        duracao_total += resultado_trecho[
+            "duracao_s"
+        ]
+
+        _juntar_geometry(
+            geometry_total,
+            resultado_trecho[
+                "geometry"
+            ],
+        )
+
+        partes_raw.append(
+            resultado_trecho[
+                "raw"
+            ]
+        )
+
+        if fim_exclusivo >= total_pontos:
+            break
+
+        # O último ponto do trecho anterior vira o primeiro
+        # do próximo trecho para manter a continuidade.
+        inicio = (
+            fim_exclusivo - 1
+        )
+
+    if not geometry_total:
+        raise ORSError(
+            "Não foi possível montar a geometria "
+            "completa da rota."
+        )
+
+    # Mantém uma estrutura semelhante ao GeoJSON original
+    # para não quebrar eventual uso futuro do campo raw.
+    raw_combinado = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {
+                    "summary": {
+                        "distance": distancia_total,
+                        "duration": duracao_total,
+                    },
+                },
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": geometry_total,
+                },
+            }
+        ],
+        "parts": partes_raw,
+    }
 
     return {
         "distancia_m": float(
-            summary["distance"]
+            distancia_total
         ),
         "duracao_s": float(
-            summary["duration"]
+            duracao_total
         ),
-        "geometry": geometry,
-        "raw": data,
+        "geometry": geometry_total,
+        "raw": raw_combinado,
     }
