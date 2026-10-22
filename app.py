@@ -6,6 +6,7 @@ import logging
 import math
 import re
 import threading
+import time
 import unicodedata
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
@@ -3966,38 +3967,72 @@ def excluir_recorrente_banco(
 # ORS / AUTOCOMPLETE
 # ============================================================
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def buscar_sugestoes_cache(texto, focus_lat, focus_lon, cidade_referencia, _api_key):
-    """Combina autocomplete e busca exata para aumentar acerto de endereço."""
+    """Responde com uma consulta por digitação, mantendo busca precisa.
+
+    - Texto parcial: /autocomplete (otimizado para respostas rápidas).
+    - Rua com número: /search (mais adequado a endereço completo).
+    - Só recorre ao segundo endpoint se não houver resultados ou houver
+      indisponibilidade do primeiro. Evita consultas sequenciais desnecessárias.
+    """
     coordenada = interpretar_texto_coordenadas(texto)
     if coordenada:
         return [coordenada]
 
-    sugestoes = autocomplete_enderecos(
-        texto=texto, api_key=_api_key, limite=12,
-        focus_lat=focus_lat, focus_lon=focus_lon,
+    cidade = str(cidade_referencia or "").strip()
+    consulta = texto
+    if cidade and normalizar_texto(cidade.split(",")[0]) not in normalizar_texto(texto):
+        consulta = f"{texto}, {cidade}"
+
+    endereco_com_numero = (
+        len(texto) >= 10
+        and bool(re.search(r"(?<!\w)\d{1,6}(?!\w)", texto))
     )
-    # O endpoint de busca completa tem melhor interpretação de rua/número;
-    # é acionado apenas em consultas mais específicas, não a cada letra.
-    consulta_completa = (
-        len(texto) >= 9
-        and (bool(re.search(r"\d", texto)) or "," in texto)
+    comum = dict(
+        api_key=_api_key,
+        limite=12,
+        focus_lat=focus_lat,
+        focus_lon=focus_lon,
     )
-    if consulta_completa or len(sugestoes) < 3:
-        consulta = texto
-        cidade = str(cidade_referencia or "").strip()
-        if cidade and normalizar_texto(cidade.split(",")[0]) not in normalizar_texto(texto):
-            consulta = f"{texto}, {cidade}"
+    inicio = time.perf_counter()
+    endpoint = "search" if endereco_com_numero else "autocomplete"
+
+    try:
+        if endereco_com_numero:
+            sugestoes = buscar_enderecos(texto=consulta, **comum)
+        else:
+            sugestoes = autocomplete_enderecos(texto=texto, **comum)
+    except ORSError:
+        # Fallback único apenas em indisponibilidade, sem repetir a mesma API.
+        logger.warning("Busca %s falhou; tentando endpoint alternativo", endpoint)
+        endpoint = "autocomplete" if endereco_com_numero else "search"
+        if endereco_com_numero:
+            sugestoes = autocomplete_enderecos(texto=texto, **comum)
+        else:
+            sugestoes = buscar_enderecos(texto=consulta, **comum)
+        fallback_ja_executado = True
+    else:
+        fallback_ja_executado = False
+
+    if not sugestoes and len(texto) >= 8 and not fallback_ja_executado:
+        # Endereço difícil: segunda estratégia só quando a primeira não achou nada.
         try:
-            completos = buscar_enderecos(
-                texto=consulta, api_key=_api_key, limite=12,
-                focus_lat=focus_lat, focus_lon=focus_lon,
-            )
-            sugestoes = completos + sugestoes
+            if endereco_com_numero:
+                sugestoes = autocomplete_enderecos(texto=texto, **comum)
+            else:
+                sugestoes = buscar_enderecos(texto=consulta, **comum)
+            endpoint += "+fallback"
         except ORSError:
-            # Não perde os resultados do autocomplete se a segunda chamada falhar.
-            logger.warning("Busca completa indisponível; usando autocomplete")
-    return ordenar_resultados_enderecos(sugestoes, texto, cidade_referencia)[:15]
+            logger.info("Fallback de geocodificação indisponível")
+
+    ordenados = ordenar_resultados_enderecos(sugestoes, texto, cidade_referencia)[:15]
+    logger.debug(
+        "Pelias endpoint=%s chars=%d resultados=%d duracao_ms=%.0f",
+        endpoint, len(texto), len(ordenados),
+        (time.perf_counter() - inicio) * 1000,
+    )
+    return ordenados
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -4092,7 +4127,7 @@ def campo_local(chave, label, placeholder, focus=None):
         key=chave,
         label=label,
         placeholder=placeholder,
-        debounce=850,
+        debounce=250,
         clear_on_submit=False,
         edit_after_submit="option",
         default_use_searchterm=True,
