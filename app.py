@@ -4064,7 +4064,7 @@ def buscar_sugestoes(searchterm, focus_lat=None, focus_lon=None):
     try:
         resultados = buscar_sugestoes_cache(
             texto, focus_lat, focus_lon,
-            st.session_state.get("cidade_referencia_busca", ""), ORS_KEY,
+            "", ORS_KEY,
         )
         st.session_state.erro_autocomplete = None
     except ORSError as erro:
@@ -8870,14 +8870,6 @@ modo_entrada = st.radio(
     ),
 )
 
-st.text_input(
-    "📌 Cidade/UF para priorizar nas buscas (opcional)",
-    key="cidade_referencia_busca",
-    placeholder="Ex.: Brusque, SC — não restringe rotas a essa cidade",
-    help=("Melhora a priorização de endereços semelhantes. "
-          "Você pode informar outra cidade diretamente na busca. "
-          "A precisão continua dependendo da cobertura cartográfica."),
-)
 st.caption(
     "Digite o endereço **ou as coordenadas diretamente no mesmo campo**, "
     "no formato `-27.0985, -48.9123` (latitude, longitude). "
@@ -9201,7 +9193,6 @@ else:
                             buscar_endereco_importado_cache_v2(
                                 endereco,
                                 ORS_KEY,
-                                st.session_state.get("cidade_referencia_busca", ""),
                             )
                         for indice_original, endereco
                         in enderecos_ativos
