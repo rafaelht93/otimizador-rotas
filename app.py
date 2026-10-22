@@ -219,6 +219,14 @@ init_state("erro_autocomplete", None)
 
 init_state("preset_local_salvo_ids", [])
 
+# Edição de uma rota salva a partir da página Nova rota.
+init_state("rota_base_edicao_id", None)
+init_state("rota_base_edicao_nome", None)
+init_state("rota_base_edicao_pontos", [])
+init_state("rota_base_edicao_voltar", False)
+init_state("rota_base_edicao_versao", 0)
+init_state("rota_base_edicao_sequencia", 0)
+
 init_state("local_form_version", 0)
 init_state("local_cadastro_aberto", False)
 init_state("local_endereco_editando_id", None)
@@ -406,6 +414,13 @@ def iniciar_nova_rota(
     )
 
     st.session_state.recorrente_gerar_id = None
+    st.session_state.rota_base_edicao_id = None
+    st.session_state.rota_base_edicao_nome = None
+    st.session_state.rota_base_edicao_pontos = []
+    st.session_state.rota_base_edicao_voltar = False
+    st.session_state.rota_base_edicao_versao += 1
+    st.session_state["manual_retorno_inicio"] = False
+    st.session_state["locais_retorno_inicio"] = False
     st.session_state.pagina_app = "nova"
 
 
@@ -4113,7 +4128,7 @@ def buscar_sugestoes(searchterm, focus_lat=None, focus_lon=None):
     return [(resultado["label"], resultado) for resultado in resultados]
 
 
-def campo_local(chave, label, placeholder, focus=None):
+def campo_local(chave, label, placeholder, focus=None, default_local=None):
     """Recebe endereço pesquisado ou par latitude/longitude no mesmo campo.
 
     `default_use_searchterm` preserva o texto digitado no searchbox;
@@ -4127,6 +4142,11 @@ def campo_local(chave, label, placeholder, focus=None):
         key=chave,
         label=label,
         placeholder=placeholder,
+        default=default_local,
+        default_searchterm=(
+            str((default_local or {}).get("label", ""))
+            if isinstance(default_local, dict) else ""
+        ),
         debounce=250,
         clear_on_submit=False,
         edit_after_submit="option",
@@ -8766,6 +8786,95 @@ def renderizar_administracao():
 
 
 # ============================================================
+# NOVA ROTA A PARTIR DE UMA ROTA SALVA
+# ============================================================
+
+def preparar_local_rota_salva_para_campo(local):
+    """Usa as coordenadas salvas; não geocodifica novamente ao carregar."""
+    if not isinstance(local, dict):
+        raise ValueError("A rota salva contém um local inválido.")
+    latitude = float(local["latitude"])
+    longitude = float(local["longitude"])
+    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+        raise ValueError("A rota salva contém coordenadas fora do intervalo válido.")
+    if not (math.isfinite(latitude) and math.isfinite(longitude)):
+        raise ValueError("A rota salva contém coordenadas inválidas.")
+    rotulo = str(local.get("label") or local.get("nome") or local.get("name") or "").strip()
+    if not rotulo:
+        rotulo = f"{latitude:.6f}, {longitude:.6f}"
+    dados = dict(local)
+    dados.update({"label": rotulo, "latitude": latitude, "longitude": longitude})
+    return dados
+
+
+def carregar_rota_base_no_editor(rota):
+    """Preenche o editor com os locais salvos em ordem original."""
+    dados = rota.get("dados") or {}
+    originais = dados.get("locais_base") or []
+    if len(originais) < 2:
+        raise ValueError("Esta rota salva não possui ao menos dois locais válidos.")
+    pontos = []
+    for item in originais:
+        st.session_state.rota_base_edicao_sequencia += 1
+        pontos.append({
+            "uid": st.session_state.rota_base_edicao_sequencia,
+            "local": preparar_local_rota_salva_para_campo(item),
+        })
+    st.session_state.rota_base_edicao_id = rota["id"]
+    st.session_state.rota_base_edicao_nome = rota["nome"]
+    st.session_state.rota_base_edicao_pontos = pontos
+    st.session_state.rota_base_edicao_voltar = bool(dados.get("voltar_inicio", False))
+    st.session_state.rota_base_edicao_versao += 1
+
+
+def remover_ponto_editor_rota_salva(uid):
+    """Exclusão local no editor; a rota no banco só muda após salvar."""
+    pontos = st.session_state.rota_base_edicao_pontos
+    if len(pontos) <= 2:
+        return
+    st.session_state.rota_base_edicao_pontos = [
+        p for p in pontos if p["uid"] != uid
+    ]
+
+
+def inserir_parada_editor_rota_salva():
+    pontos = st.session_state.rota_base_edicao_pontos
+    st.session_state.rota_base_edicao_sequencia += 1
+    novo = {"uid": st.session_state.rota_base_edicao_sequencia, "local": None}
+    if st.session_state.rota_base_edicao_voltar:
+        pontos.append(novo)
+    else:
+        pontos.insert(max(1, len(pontos) - 1), novo)
+
+
+def campo_editavel_rota_salva(ponto, numero, tipo, foco):
+    """Mostra o endereço anterior e permite trocá-lo com autocomplete."""
+    a, b = st.columns([8, 2], vertical_alignment="bottom")
+    with a:
+        encontrado = campo_local(
+            chave=f"editor_rota_{st.session_state.rota_base_edicao_versao}_{ponto['uid']}",
+            label=f"{numero}. {tipo}",
+            placeholder="Endereço ou latitude, longitude...",
+            focus=foco,
+            default_local=ponto.get("local"),
+        )
+        if isinstance(encontrado, dict) and "latitude" in encontrado and "longitude" in encontrado:
+            ponto["local"] = encontrado
+        elif not encontrado:
+            # Quando texto está sendo editado, não persistir endereço antigo sem confirmação.
+            pass
+    with b:
+        if st.button(
+            "🗑️ Excluir", key=f"excluir_editor_{st.session_state.rota_base_edicao_versao}_{ponto['uid']}",
+            disabled=len(st.session_state.rota_base_edicao_pontos) <= 2,
+            use_container_width=True,
+        ):
+            remover_ponto_editor_rota_salva(ponto["uid"])
+            st.rerun()
+    return encontrado if isinstance(encontrado, dict) else None
+
+
+# ============================================================
 # PÁGINAS
 # ============================================================
 
@@ -8889,6 +8998,7 @@ modo_entrada = st.radio(
         "Digitar manualmente",
         "Importar CSV/Excel",
         "Selecionar locais salvos",
+        "Usar rota salva",
     ],
     index=(
         2
@@ -8922,12 +9032,21 @@ voltar_inicio = False
 # ============================================================
 
 if modo_entrada == "Digitar manualmente":
-    voltar_inicio = st.checkbox("🔄 Retornar ao ponto inicial")
+    # Retorno é renderizado após o último ponto do formulário.
+    voltar_inicio = bool(st.session_state.get("manual_retorno_inicio", False))
     ponto_inicio = campo_local(
         chave=f"inicio_{st.session_state.form_version}_{st.session_state.manual_campos_version}",
         label="1. Ponto inicial",
         placeholder="Endereço completo ou latitude, longitude...",
     )
+
+    for i in range(st.session_state.num_paradas):
+        paradas.append(campo_local(
+            chave=f"parada_{st.session_state.form_version}_{st.session_state.manual_campos_version}_{i}",
+            label=f"{i + 2}. Parada {i + 1}",
+            placeholder="Endereço completo ou latitude, longitude...",
+            focus=ponto_inicio,
+        ))
 
     col_adicionar, col_remover = st.columns(2)
     with col_adicionar:
@@ -8943,29 +9062,121 @@ if modo_entrada == "Digitar manualmente":
             st.session_state.num_paradas -= 1
             st.rerun()
 
-    for i in range(st.session_state.num_paradas):
-        paradas.append(campo_local(
-            chave=f"parada_{st.session_state.form_version}_{st.session_state.manual_campos_version}_{i}",
-            label=f"{i + 2}. Parada {i + 1}",
-            placeholder="Endereço completo ou latitude, longitude...",
-            focus=ponto_inicio,
-        ))
-
     numero_fim = st.session_state.num_paradas + 2
-    if voltar_inicio:
-        ponto_fim = ponto_inicio
-        st.text_input(
-            f"{numero_fim}. Ponto final (retorno ao ponto 1)",
-            value=(ponto_inicio.get("label", "") if ponto_inicio else ""),
-            disabled=True,
-        )
-    else:
+    if not voltar_inicio:
         ponto_fim = campo_local(
             chave=f"fim_{st.session_state.form_version}_{st.session_state.manual_campos_version}",
             label=f"{numero_fim}. Ponto final",
             placeholder="Endereço completo ou latitude, longitude...",
             focus=ponto_inicio,
         )
+
+    voltar_inicio = st.checkbox(
+        "🔄 Retornar ao ponto inicial", key="manual_retorno_inicio"
+    )
+    if voltar_inicio:
+        ponto_fim = ponto_inicio
+
+
+# ============================================================
+# ROTA SALVA - ENDEREÇOS EDITÁVEIS
+# ============================================================
+
+elif modo_entrada == "Usar rota salva":
+    rota_salva_selecionada = None
+    enderecos_invalidos_rota_salva = False
+    try:
+        rotas_disponiveis = listar_rotas_usuario()
+    except Exception as erro:
+        mostrar_erro_usuario("Falha ao carregar rotas salvas", erro)
+        rotas_disponiveis = []
+
+    if not rotas_disponiveis:
+        st.info("Nenhuma rota salva disponível. Salve uma rota primeiro em Minhas rotas.")
+    else:
+        por_id = {str(r["id"]): r for r in rotas_disponiveis}
+        escolha = st.selectbox(
+            "Selecione uma rota salva para usar como base",
+            options=list(por_id),
+            index=None,
+            placeholder="Escolha a rota...",
+            format_func=lambda rid: por_id[rid].get("nome", "Rota sem nome"),
+            key=f"rota_base_escolhida_{st.session_state.form_version}",
+        )
+        if escolha is not None:
+            rota_salva_selecionada = por_id[escolha]
+            if str(st.session_state.rota_base_edicao_id) != escolha:
+                try:
+                    carregar_rota_base_no_editor(rota_salva_selecionada)
+                except (ValueError, KeyError, TypeError) as erro:
+                    st.error(f"Não foi possível carregar a rota: {erro}")
+                    st.stop()
+
+            st.caption(
+                "Altere os endereços diretamente, exclua pontos ou adicione novas paradas. "
+                "As mudanças só substituem a rota original ao clicar em "
+                "**Recalcular e salvar alterações**."
+            )
+            lista = st.session_state.rota_base_edicao_pontos
+            retorno_atual = bool(st.session_state.rota_base_edicao_voltar)
+            foco = None
+            valores = {}
+
+            # Ponto inicial
+            primeiro = lista[0]
+            valores[primeiro["uid"]] = campo_editavel_rota_salva(
+                primeiro, 1, "Ponto inicial", None
+            )
+            ponto_inicio = valores[primeiro["uid"]]
+            foco = ponto_inicio or primeiro.get("local")
+
+            # Paradas (último é destino somente em rota sem retorno).
+            intermediarios = lista[1:] if retorno_atual else lista[1:-1]
+            for numero_parada, ponto in enumerate(intermediarios, start=1):
+                valores[ponto["uid"]] = campo_editavel_rota_salva(
+                    ponto, numero_parada + 1, f"Parada {numero_parada}", foco
+                )
+                paradas.append(valores[ponto["uid"]])
+
+            st.button(
+                "➕ Adicionar parada",
+                key=f"adicionar_editor_{st.session_state.rota_base_edicao_versao}",
+                on_click=inserir_parada_editor_rota_salva,
+                use_container_width=True,
+                disabled=(limite_locais > 0 and len(lista) >= limite_locais),
+            )
+
+            if not retorno_atual:
+                ultimo = lista[-1]
+                valores[ultimo["uid"]] = campo_editavel_rota_salva(
+                    ultimo, len(lista), "Ponto final", foco
+                )
+                ponto_fim = valores[ultimo["uid"]]
+
+            # Sempre após o último ponto da rota.
+            voltar_inicio = st.checkbox(
+                "🔄 Retornar ao ponto inicial",
+                value=retorno_atual,
+                key=f"editor_retorno_{st.session_state.rota_base_edicao_versao}",
+            )
+            st.session_state.rota_base_edicao_voltar = voltar_inicio
+            if voltar_inicio != retorno_atual:
+                # Reclassifica imediatamente a última parada como destino
+                # (ou o inverso), sem esperar outra interação do usuário.
+                st.rerun()
+            if voltar_inicio:
+                ponto_fim = ponto_inicio
+
+            enderecos_invalidos_rota_salva = any(
+                valores.get(p["uid"]) is None for p in lista
+            )
+            if enderecos_invalidos_rota_salva:
+                st.warning(
+                    "Existem endereços ainda não confirmados. "
+                    "Escolha uma sugestão para cada ponto ou informe coordenadas válidas."
+                )
+            if limite_locais > 0 and len(lista) > limite_locais:
+                st.warning(f"Seu plano permite até {limite_locais} locais por rota.")
 
 
 # ============================================================
@@ -9050,18 +9261,10 @@ elif (
             )
         )
 
-        voltar_inicio = st.checkbox(
-            "🔄 Retornar ao ponto inicial"
-        )
-
+        voltar_inicio = bool(st.session_state.get("locais_retorno_inicio", False))
         fim_id = None
 
-        if voltar_inicio:
-
-            ponto_fim = ponto_inicio
-
-        else:
-
+        if not voltar_inicio:
             fim_id = st.selectbox(
                 "Ponto final",
                 [
@@ -9084,6 +9287,12 @@ elif (
                     ]
                 )
             )
+
+        voltar_inicio = st.checkbox(
+            "🔄 Retornar ao ponto inicial", key="locais_retorno_inicio"
+        )
+        if voltar_inicio:
+            ponto_fim = ponto_inicio
 
         paradas = [
             local_salvo_para_origem(
@@ -9474,9 +9683,8 @@ else:
                     ),
                 )
 
-                voltar_inicio = st.checkbox(
-                    "🔄 Retornar ao ponto inicial",
-                    key=f"csv_voltar_{hash_arquivo}",
+                voltar_inicio = bool(
+                    st.session_state.get(f"csv_voltar_{hash_arquivo}", False)
                 )
 
                 indice_fim = None
@@ -9539,6 +9747,13 @@ else:
                         ponto_fim = confirmados_por_id[
                             indice_fim
                         ]
+
+                voltar_inicio = st.checkbox(
+                    "🔄 Retornar ao ponto inicial",
+                    key=f"csv_voltar_{hash_arquivo}",
+                )
+                if voltar_inicio:
+                    ponto_fim = ponto_inicio
 
                 paradas = [
                     confirmados_por_id[indice]
@@ -9638,11 +9853,36 @@ with c2:
 
 st.divider()
 
-if st.button(
-    "🚗 Calcular melhor rota",
-    type="primary",
-    use_container_width=True,
-):
+salvar_sobre_rota_base = False
+if modo_entrada == "Usar rota salva" and rota_salva_selecionada is not None:
+    coluna_previa, coluna_salvar = st.columns(2)
+    with coluna_previa:
+        calcular_agora = st.button(
+            "🚗 Calcular sem salvar",
+            type="secondary",
+            use_container_width=True,
+        )
+    with coluna_salvar:
+        salvar_sobre_rota_base = st.button(
+            "💾 Recalcular e salvar alterações",
+            type="primary",
+            use_container_width=True,
+        )
+else:
+    calcular_agora = st.button(
+        "🚗 Calcular melhor rota",
+        type="primary",
+        use_container_width=True,
+    )
+
+if calcular_agora or salvar_sobre_rota_base:
+    if modo_entrada == "Usar rota salva":
+        if rota_salva_selecionada is None:
+            st.error("Escolha primeiro uma rota salva.")
+            st.stop()
+        if enderecos_invalidos_rota_salva:
+            st.error("Confirme todos os endereços antes de calcular ou salvar.")
+            st.stop()
 
     if not ponto_inicio:
 
@@ -9728,20 +9968,26 @@ if st.button(
                 )
             )
 
-        st.session_state.resultado_rota = (
-            resultado
-        )
+        # Pré-visualizar não altera a rota salva; salvar substitui os
+        # dados apenas depois do recálculo bem-sucedido.
+        id_atualizado = None
+        nome_atualizado = None
+        if salvar_sobre_rota_base:
+            id_atualizado = st.session_state.rota_base_edicao_id
+            nome_atualizado = st.session_state.rota_base_edicao_nome
+            atualizar_rota_completa_banco(
+                id_atualizado, nome_atualizado, resultado
+            )
 
-        st.session_state.rota_atual_id = None
-        st.session_state.rota_atual_nome = None
-        st.session_state.rota_aberta_salva = False
+        st.session_state.resultado_rota = resultado
+        st.session_state.rota_atual_id = id_atualizado
+        st.session_state.rota_atual_nome = nome_atualizado
+        st.session_state.rota_aberta_salva = bool(id_atualizado)
         st.session_state.resultado_historico = False
         st.session_state.resultado_direto = False
 
-        execucao, erro = (
-            registrar_execucao_seguro(
-                resultado
-            )
+        execucao, erro = registrar_execucao_seguro(
+            resultado, id_atualizado, nome_atualizado
         )
 
         st.session_state.ultima_execucao_id = (
@@ -9754,12 +10000,21 @@ if st.button(
         )
 
         if erro:
-
             st.warning(
                 "A rota foi calculada, "
                 "mas o histórico não pôde "
                 f"ser registrado: {erro}"
             )
+
+        if salvar_sobre_rota_base:
+            st.session_state.mensagem_sistema = {
+                "tipo": "success",
+                "texto": (
+                    f"Rota '{nome_atualizado}' atualizada com sucesso. "
+                    "Os novos endereços e a ordem otimizada foram salvos."
+                ),
+            }
+            st.rerun()
 
     except (
         LimiteUsoError,
