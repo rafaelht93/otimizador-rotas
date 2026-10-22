@@ -2,6 +2,7 @@ import hashlib
 import html
 import io
 import json
+import logging
 import unicodedata
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
@@ -26,6 +27,13 @@ from ors import (
 from route_engine import (
     RouteOptimizationError,
     otimizar_rota,
+)
+
+from app_logic import (
+    dividir_rota_google_maps as dividir_rota_google_maps_logic,
+    locais_para_execucao as locais_para_execucao_logic,
+    resolver_perfil_efetivo,
+    validar_regras_plano,
 )
 
 
@@ -53,6 +61,42 @@ class LimiteUsoError(Exception):
 
 class PagamentoError(Exception):
     pass
+
+
+class OperacaoUsuarioError(Exception):
+    pass
+
+
+logger = logging.getLogger("otimizador_rotas")
+
+
+def mostrar_erro_usuario(
+    contexto,
+    erro,
+    mensagem_padrao="Não foi possível concluir a operação. Tente novamente.",
+):
+    logger.error(
+        "%s: %s",
+        contexto,
+        erro,
+        exc_info=(type(erro), erro, erro.__traceback__),
+    )
+
+    if isinstance(
+        erro,
+        (
+            LimiteUsoError,
+            PagamentoError,
+            ORSError,
+            RouteOptimizationError,
+            ValueError,
+            PermissionError,
+            OperacaoUsuarioError,
+        ),
+    ):
+        st.error(str(erro))
+    else:
+        st.error(mensagem_padrao)
 
 
 # ============================================================
@@ -353,73 +397,190 @@ def supabase_request(
     json_body=None,
     prefer=None,
 ):
-
+    """Requisição REST de baixo nível usando a chave secreta do backend."""
     if not supabase_configurado:
-
-        raise RuntimeError(
-            "Supabase não configurado."
-        )
+        raise RuntimeError("Supabase não configurado.")
 
     headers = {
-        "apikey":
-            SUPABASE_SECRET_KEY,
-
-        "Content-Type":
-            "application/json",
+        "apikey": SUPABASE_SECRET_KEY,
+        "Content-Type": "application/json",
     }
 
     if prefer:
-
         headers["Prefer"] = prefer
 
     try:
-
         response = requests.request(
             method=method,
-            url=(
-                f"{SUPABASE_URL}"
-                f"/rest/v1/{tabela}"
-            ),
+            url=f"{SUPABASE_URL}/rest/v1/{tabela}",
             headers=headers,
             params=params,
             json=json_body,
             timeout=20,
         )
-
     except requests.Timeout as e:
-
-        raise RuntimeError(
-            "O Supabase demorou demais para responder."
-        ) from e
-
+        logger.exception("Timeout ao acessar Supabase")
+        raise RuntimeError("O Supabase demorou demais para responder.") from e
     except requests.RequestException as e:
-
-        raise RuntimeError(
-            "Não foi possível conectar ao Supabase."
-        ) from e
+        logger.exception("Falha de conexão com Supabase")
+        raise RuntimeError("Não foi possível conectar ao Supabase.") from e
 
     if response.status_code >= 400:
+        detalhe = ""
+        try:
+            payload = response.json()
+            detalhe = str(payload.get("message") or payload.get("error") or "")
+        except Exception:
+            detalhe = response.text[:300]
 
-        raise RuntimeError(
-            "Erro ao acessar o banco de dados "
-            f"(HTTP {response.status_code})."
+        logger.error(
+            "Erro Supabase REST tabela=%s method=%s status=%s detalhe=%s",
+            tabela,
+            method,
+            response.status_code,
+            detalhe,
         )
+        raise RuntimeError(f"supabase_http_{response.status_code}:{detalhe}")
 
-    if (
-        response.status_code == 204
-        or
-        not response.text.strip()
-    ):
-
+    if response.status_code == 204 or not response.text.strip():
         return []
 
     try:
-
         return response.json()
-
     except ValueError:
-
         return []
+
+
+def supabase_rpc(nome, payload=None):
+    """Executa uma RPC no Supabase usando apenas o backend."""
+    if not supabase_configurado:
+        raise RuntimeError("Supabase não configurado.")
+
+    try:
+        response = requests.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/{nome}",
+            headers={
+                "apikey": SUPABASE_SECRET_KEY,
+                "Content-Type": "application/json",
+            },
+            json=payload or {},
+            timeout=30,
+        )
+    except requests.Timeout as e:
+        logger.exception("Timeout na RPC %s", nome)
+        raise RuntimeError("O Supabase demorou demais para responder.") from e
+    except requests.RequestException as e:
+        logger.exception("Falha de conexão na RPC %s", nome)
+        raise RuntimeError("Não foi possível conectar ao Supabase.") from e
+
+    if response.status_code >= 400:
+        detalhe = ""
+        try:
+            dados = response.json()
+            detalhe = str(dados.get("message") or dados.get("error") or "")
+        except Exception:
+            detalhe = response.text[:300]
+
+        logger.error(
+            "Erro Supabase RPC=%s status=%s detalhe=%s",
+            nome,
+            response.status_code,
+            detalhe,
+        )
+        raise RuntimeError(f"supabase_rpc_{nome}:{detalhe}")
+
+    if not response.text.strip():
+        return []
+
+    try:
+        return response.json()
+    except ValueError:
+        return []
+
+
+def supabase_user_request(
+    tabela,
+    method,
+    params=None,
+    json_body=None,
+    prefer=None,
+):
+    """Acesso a dados do usuário com escopo injetado automaticamente."""
+    metodo = str(method).upper()
+    parametros = dict(params or {})
+    alvo = str(usuario_id)
+
+    if metodo in ("GET", "PATCH", "DELETE"):
+        filtro_existente = parametros.get("user_id")
+        filtro_correto = f"eq.{alvo}"
+        if filtro_existente not in (None, filtro_correto):
+            raise PermissionError("Tentativa de acesso fora do escopo do usuário.")
+        parametros["user_id"] = filtro_correto
+
+    corpo = json_body
+
+    if metodo == "POST" and json_body is not None:
+        if isinstance(json_body, list):
+            corpo = []
+            for item in json_body:
+                registro = dict(item)
+                existente = registro.get("user_id")
+                if existente not in (None, alvo):
+                    raise PermissionError("Tentativa de gravação fora do escopo do usuário.")
+                registro["user_id"] = alvo
+                corpo.append(registro)
+        elif isinstance(json_body, dict):
+            corpo = dict(json_body)
+            existente = corpo.get("user_id")
+            if existente not in (None, alvo):
+                raise PermissionError("Tentativa de gravação fora do escopo do usuário.")
+            corpo["user_id"] = alvo
+
+    return supabase_request(
+        tabela,
+        metodo,
+        params=parametros,
+        json_body=corpo,
+        prefer=prefer,
+    )
+
+
+def exigir_admin_atual():
+    """Revalida o privilégio administrativo no momento da operação."""
+    registros = supabase_user_request(
+        "usuarios_app",
+        "GET",
+        params={
+            "select": "user_id,ativo,is_admin",
+            "limit": "1",
+        },
+    )
+
+    perfil = registros[0] if registros else None
+
+    if not perfil or not perfil.get("ativo", True) or not perfil.get("is_admin", False):
+        raise PermissionError("Acesso administrativo não autorizado.")
+
+    return perfil
+
+
+def supabase_admin_request(
+    tabela,
+    method,
+    params=None,
+    json_body=None,
+    prefer=None,
+):
+    """Acesso sem filtro de usuário permitido apenas após revalidar admin."""
+    exigir_admin_atual()
+    return supabase_request(
+        tabela,
+        method,
+        params=params,
+        json_body=json_body,
+        prefer=prefer,
+    )
+
 
 
 # ============================================================
@@ -566,13 +727,10 @@ def listar_assinaturas_usuario(
     limite=20,
 ):
 
-    alvo = (
-        user_id_alvo
-        or
-        usuario_id
-    )
+    if user_id_alvo not in (None, usuario_id):
+        raise PermissionError("Consulta de assinatura fora do escopo do usuário.")
 
-    return supabase_request(
+    return supabase_user_request(
         "assinaturas",
         "GET",
         params={
@@ -590,7 +748,7 @@ def listar_assinaturas_usuario(
                 ),
 
             "user_id":
-                f"eq.{alvo}",
+                f"eq.{usuario_id}",
 
             "order":
                 "created_at.desc",
@@ -830,7 +988,10 @@ def renderizar_execucao_entrega_detalhe(execucao_id):
                         )
                         st.rerun()
                     except Exception as e:
-                        st.error(str(e))
+                        mostrar_erro_usuario(
+                            "Falha ao atualizar parada da execução",
+                            e,
+                        )
 
             with c2:
                 if st.button(
@@ -850,7 +1011,10 @@ def renderizar_execucao_entrega_detalhe(execucao_id):
                         )
                         st.rerun()
                     except Exception as e:
-                        st.error(str(e))
+                        mostrar_erro_usuario(
+                            "Falha ao atualizar parada da execução",
+                            e,
+                        )
 
     st.markdown(
         "### 📋 Todas as paradas"
@@ -983,7 +1147,10 @@ def renderizar_execucao_entrega_detalhe(execucao_id):
                     )
                     st.rerun()
                 except Exception as e:
-                    st.error(str(e))
+                    mostrar_erro_usuario(
+                        "Falha na operação",
+                        e,
+                    )
         else:
             pendentes = max(
                 total - concluidas,
@@ -1021,7 +1188,10 @@ def renderizar_execucao_entrega_detalhe(execucao_id):
                     )
                     st.rerun()
                 except Exception as e:
-                    st.error(str(e))
+                    mostrar_erro_usuario(
+                        "Falha na operação",
+                        e,
+                    )
 
 
 def renderizar_execucoes_entrega():
@@ -1039,7 +1209,10 @@ def renderizar_execucoes_entrega():
             limite=100
         )
     except Exception as e:
-        st.error(str(e))
+        mostrar_erro_usuario(
+            "Falha ao carregar dados",
+            e,
+        )
         return
 
     ativa = next(
@@ -1207,42 +1380,24 @@ def obter_plano(
 def obter_usuario_app(
     user_id_alvo=None,
 ):
+    if user_id_alvo not in (None, usuario_id):
+        raise PermissionError("Consulta de perfil fora do escopo do usuário.")
 
-    user_id_consulta = (
-        user_id_alvo
-        or
-        usuario_id
-    )
-
-    registros = supabase_request(
+    registros = supabase_user_request(
         "usuarios_app",
         "GET",
         params={
-            "select":
-                (
-                    "user_id,nome,email,"
-                    "plano,ativo,"
-                    "limite_rotas_mes,"
-                    "limite_locais_rota,"
-                    "permite_preciso,"
-                    "usar_limites_personalizados,"
-                    "is_admin,"
-                    "created_at,updated_at"
-                ),
-
-            "user_id":
-                f"eq.{user_id_consulta}",
-
-            "limit":
-                "1",
+            "select": (
+                "user_id,nome,email,plano,ativo,"
+                "limite_rotas_mes,limite_locais_rota,permite_preciso,"
+                "usar_limites_personalizados,is_admin,created_at,updated_at"
+            ),
+            "limit": "1",
         },
     )
 
-    if registros:
+    return registros[0] if registros else None
 
-        return registros[0]
-
-    return None
 
 
 def garantir_usuario_app():
@@ -1251,7 +1406,7 @@ def garantir_usuario_app():
 
     if perfil is None:
 
-        registros = supabase_request(
+        registros = supabase_user_request(
             "usuarios_app",
             "POST",
             json_body={
@@ -1320,7 +1475,7 @@ def garantir_usuario_app():
             agora_iso()
         )
 
-        registros = supabase_request(
+        registros = supabase_user_request(
             "usuarios_app",
             "PATCH",
             params={
@@ -1341,171 +1496,20 @@ def garantir_usuario_app():
 def perfil_efetivo(
     perfil,
 ):
-
     if not perfil:
         return None
 
-    nome_plano = (
-        perfil.get("plano")
-        or
-        "Gratuito"
-    )
-
-    plano = obter_plano(
-        nome_plano
-    )
+    nome_plano = perfil.get("plano") or "Gratuito"
+    plano = obter_plano(nome_plano)
 
     if not plano:
+        raise RuntimeError(f"O plano '{nome_plano}' não foi encontrado.")
 
-        raise RuntimeError(
-            f"O plano '{nome_plano}' "
-            "não foi encontrado."
-        )
+    try:
+        return resolver_perfil_efetivo(perfil, plano)
+    except ValueError as e:
+        raise RuntimeError(str(e)) from e
 
-    personalizado = bool(
-        perfil.get(
-            "usar_limites_personalizados",
-            False,
-        )
-    )
-
-    if personalizado:
-
-        limite_rotas = int(
-            perfil.get(
-                "limite_rotas_mes"
-            )
-            or
-            0
-        )
-
-        limite_locais = int(
-            perfil.get(
-                "limite_locais_rota"
-            )
-            or
-            2
-        )
-
-        permite_preciso = bool(
-            perfil.get(
-                "permite_preciso",
-                False,
-            )
-        )
-
-    else:
-
-        limite_rotas = int(
-            plano.get(
-                "limite_rotas_mes"
-            )
-            or
-            0
-        )
-
-        limite_locais = int(
-            plano.get(
-                "limite_locais_rota"
-            )
-            or
-            2
-        )
-
-        permite_preciso = bool(
-            plano.get(
-                "permite_preciso",
-                False,
-            )
-        )
-
-    return {
-        "user_id":
-            perfil["user_id"],
-
-        "nome":
-            perfil.get("nome"),
-
-        "email":
-            perfil.get("email"),
-
-        "plano":
-            nome_plano,
-
-        "plano_descricao":
-            plano.get("descricao"),
-
-        "preco_mensal":
-            float(
-                plano.get(
-                    "preco_mensal"
-                )
-                or
-                0
-            ),
-
-        "moeda":
-            plano.get("moeda")
-            or
-            "BRL",
-
-        "ativo":
-            bool(
-                perfil.get(
-                    "ativo",
-                    True,
-                )
-            ),
-
-        "is_admin":
-            bool(
-                perfil.get(
-                    "is_admin",
-                    False,
-                )
-            ),
-
-        "usar_limites_personalizados":
-            personalizado,
-
-        "limite_rotas_mes":
-            limite_rotas,
-
-        "limite_locais_rota":
-            limite_locais,
-
-        "permite_preciso":
-            permite_preciso,
-
-        "permite_recorrentes":
-            bool(
-                plano.get(
-                    "permite_recorrentes",
-                    False,
-                )
-            ),
-
-        "historico_dias":
-            plano.get(
-                "historico_dias"
-            ),
-
-        "permite_exportacoes":
-            bool(
-                plano.get(
-                    "permite_exportacoes",
-                    False,
-                )
-            ),
-
-        "plano_ativo":
-            bool(
-                plano.get(
-                    "ativo",
-                    True,
-                )
-            ),
-    }
 
 
 def intervalo_mes_atual():
@@ -1558,35 +1562,53 @@ def proximo_ciclo_texto():
 def contar_execucoes_mes_usuario(
     user_id_alvo,
 ):
+    if user_id_alvo != usuario_id:
+        exigir_admin_atual()
 
-    inicio, fim = (
-        intervalo_mes_atual()
+    resultado = supabase_rpc(
+        "contar_uso_mes",
+        {"p_user_id": user_id_alvo},
     )
 
-    registros = supabase_request(
-        "execucoes_rotas",
-        "GET",
-        params={
-            "select":
-                "id",
+    if isinstance(resultado, int):
+        return int(resultado)
 
-            "user_id":
-                f"eq.{user_id_alvo}",
+    if isinstance(resultado, list):
+        if not resultado:
+            return 0
+        primeiro = resultado[0]
+        if isinstance(primeiro, dict):
+            for chave in ("contar_uso_mes", "count", "uso"):
+                if chave in primeiro:
+                    return int(primeiro[chave] or 0)
+        return int(primeiro or 0)
 
-            "and":
-                (
-                    "(created_at.gte."
-                    f"{inicio.isoformat()},"
-                    "created_at.lt."
-                    f"{fim.isoformat()})"
-                ),
+    if isinstance(resultado, dict):
+        for chave in ("contar_uso_mes", "count", "uso"):
+            if chave in resultado:
+                return int(resultado[chave] or 0)
 
-            "limit":
-                "10000",
-        },
+    return int(resultado or 0)
+
+
+def resumo_uso_mes_admin():
+    exigir_admin_atual()
+    registros = supabase_rpc("resumo_uso_mes", {})
+    return {
+        item["user_id"]: int(item.get("uso") or 0)
+        for item in (registros or [])
+    }
+
+
+def listar_assinaturas_admin():
+    exigir_admin_atual()
+    resultado = supabase_rpc(
+        "resumo_assinaturas_admin",
+        {},
     )
+    return resultado or []
 
-    return len(registros)
+
 
 
 def contar_execucoes_mes_atual():
@@ -1788,109 +1810,108 @@ def validar_permissao_calculo(
     quantidade_locais,
     modo,
 ):
-
     if not supabase_configurado:
-
         raise LimiteUsoError(
-            "O controle de uso está indisponível. "
-            "Nenhum cálculo foi iniciado."
+            "O controle de uso está indisponível. Nenhum cálculo foi iniciado."
         )
 
     try:
-
         perfil_atual = obter_usuario_app()
-
-        efetivo = perfil_efetivo(
-            perfil_atual
+        efetivo = perfil_efetivo(perfil_atual)
+        validar_regras_plano(
+            efetivo,
+            quantidade_locais,
+            modo,
+            uso_atual=None,
         )
-
+    except ValueError as e:
+        mapa = {
+            "perfil_nao_encontrado": "Seu perfil não foi encontrado.",
+            "conta_inativa": "Sua conta está inativa.",
+            "limite_locais": (
+                f"Seu plano permite até {limite_locais_usuario()} locais por rota."
+            ),
+            "preciso_indisponivel": "O modo Preciso não está disponível no seu plano.",
+        }
+        raise LimiteUsoError(mapa.get(str(e), "Não foi possível validar seu plano.")) from e
     except Exception as e:
-
+        logger.error(
+            "Falha ao validar plano antes da reserva: %s",
+            e,
+            exc_info=(type(e), e, e.__traceback__),
+        )
         raise LimiteUsoError(
-            "Não foi possível validar seu plano. "
-            "Nenhum cálculo foi iniciado."
+            "Não foi possível validar seu plano. Nenhum cálculo foi iniciado."
         ) from e
 
-    if not efetivo:
 
+def reservar_calculo_atomico(
+    quantidade_locais,
+    objetivo,
+    modo,
+    voltar_inicio,
+):
+    try:
+        resultado = supabase_rpc(
+            "reservar_calculo",
+            {
+                "p_user_id": usuario_id,
+                "p_quantidade_locais": int(quantidade_locais),
+                "p_objetivo": objetivo,
+                "p_modo": modo,
+                "p_voltar_inicio": bool(voltar_inicio),
+            },
+        )
+    except Exception as e:
+        texto = str(e)
+        mensagens = {
+            "quota_exceeded": (
+                "Você atingiu o limite mensal de cálculos do seu plano. "
+                f"Seu próximo ciclo começa em {proximo_ciclo_texto()}."
+            ),
+            "location_limit_exceeded": (
+                f"Seu plano permite até {limite_locais_usuario()} locais por rota."
+            ),
+            "precise_not_allowed": "O modo Preciso não está disponível no seu plano.",
+            "user_inactive": "Sua conta está inativa.",
+            "user_not_found": "Seu perfil não foi encontrado.",
+            "plan_not_available": "Seu plano está indisponível no momento.",
+        }
+        for codigo, mensagem in mensagens.items():
+            if codigo in texto:
+                raise LimiteUsoError(mensagem) from e
+
+        logger.error(
+            "Falha ao reservar cálculo: %s",
+            e,
+            exc_info=(type(e), e, e.__traceback__),
+        )
         raise LimiteUsoError(
-            "Seu perfil não foi encontrado."
+            "Não foi possível reservar seu cálculo. Tente novamente."
+        ) from e
+
+    if not resultado:
+        raise LimiteUsoError("Não foi possível reservar seu cálculo. Tente novamente.")
+
+    registro = resultado[0] if isinstance(resultado, list) else resultado
+    return registro
+
+
+def cancelar_reserva_calculo(execucao_id):
+    if not execucao_id:
+        return
+
+    try:
+        supabase_rpc(
+            "cancelar_reserva_calculo",
+            {
+                "p_execucao_id": execucao_id,
+                "p_user_id": usuario_id,
+            },
         )
+    except Exception:
+        logger.exception("Falha ao liberar reserva de cálculo %s", execucao_id)
 
-    if not efetivo.get(
-        "ativo",
-        True,
-    ):
-
-        raise LimiteUsoError(
-            "Sua conta está inativa."
-        )
-
-    limite_locais = int(
-        efetivo.get(
-            "limite_locais_rota"
-        )
-        or
-        0
-    )
-
-    if (
-        limite_locais > 0
-        and
-        quantidade_locais > limite_locais
-    ):
-
-        raise LimiteUsoError(
-            "Seu plano permite até "
-            f"{limite_locais} locais por rota."
-        )
-
-    if (
-        modo == "Preciso"
-        and
-        not efetivo.get(
-            "permite_preciso",
-            False,
-        )
-    ):
-
-        raise LimiteUsoError(
-            "O modo Preciso não está disponível "
-            "no seu plano."
-        )
-
-    limite_mes = int(
-        efetivo.get(
-            "limite_rotas_mes"
-        )
-        or
-        0
-    )
-
-    if limite_mes > 0:
-
-        try:
-
-            uso = (
-                contar_execucoes_mes_atual()
-            )
-
-        except Exception as e:
-
-            raise LimiteUsoError(
-                "Não foi possível verificar "
-                "seu consumo mensal. "
-                "Nenhum cálculo foi iniciado."
-            ) from e
-
-        if uso >= limite_mes:
-
-            raise LimiteUsoError(
-                "Você atingiu o limite mensal "
-                f"de {limite_mes} cálculo(s). "
-                "Seu próximo ciclo começa em "
-                f"{proximo_ciclo_texto()}."
-            )
 
 
 # ============================================================
@@ -2192,7 +2213,7 @@ mostrar_mensagem_sistema()
 
 def listar_rotas_usuario():
 
-    return supabase_request(
+    return supabase_user_request(
         "rotas",
         "GET",
         params={
@@ -2213,7 +2234,7 @@ def listar_rotas_usuario():
 
 def contar_rotas_usuario():
 
-    registros = supabase_request(
+    registros = supabase_user_request(
         "rotas",
         "GET",
         params={
@@ -2245,7 +2266,7 @@ def salvar_rota_banco(
             "Informe um nome para a rota."
         )
 
-    resultado = supabase_request(
+    resultado = supabase_user_request(
         "rotas",
         "POST",
         json_body={
@@ -2278,7 +2299,7 @@ def atualizar_rota_banco(
     dados,
 ):
 
-    resultado = supabase_request(
+    resultado = supabase_user_request(
         "rotas",
         "PATCH",
         params={
@@ -2315,7 +2336,7 @@ def atualizar_rota_completa_banco(
     dados,
 ):
 
-    resultado = supabase_request(
+    resultado = supabase_user_request(
         "rotas",
         "PATCH",
         params={
@@ -2366,7 +2387,7 @@ def renomear_rota_banco(
             "Informe o novo nome."
         )
 
-    resultado = supabase_request(
+    resultado = supabase_user_request(
         "rotas",
         "PATCH",
         params={
@@ -2399,7 +2420,7 @@ def excluir_rota_banco(
     rota_id,
 ):
 
-    resultado = supabase_request(
+    resultado = supabase_user_request(
         "rotas",
         "DELETE",
         params={
@@ -2424,56 +2445,18 @@ def excluir_rota_banco(
 # ============================================================
 
 def _mesma_coordenada(local_a, local_b):
-    if not local_a or not local_b:
-        return False
+    from app_logic import mesma_coordenada
+    return mesma_coordenada(local_a, local_b)
 
-    try:
-        return (
-            round(float(local_a["latitude"]), 6)
-            == round(float(local_b["latitude"]), 6)
-            and
-            round(float(local_a["longitude"]), 6)
-            == round(float(local_b["longitude"]), 6)
-        )
-    except Exception:
-        return False
 
 
 def locais_para_execucao(dados):
-    """
-    Converte a sequência otimizada em paradas operacionais.
+    return locais_para_execucao_logic(dados)
 
-    O ponto inicial é tratado como base/saída e não vira uma
-    entrega. Em rota fechada, o retorno final à origem também
-    é removido da lista operacional.
-    """
-    locais = list(
-        dados.get("locais_ordenados")
-        or []
-    )
-
-    if len(locais) < 2:
-        return []
-
-    operacionais = list(
-        locais[1:]
-    )
-
-    if (
-        bool(dados.get("voltar_inicio", False))
-        and operacionais
-        and _mesma_coordenada(
-            locais[0],
-            operacionais[-1],
-        )
-    ):
-        operacionais = operacionais[:-1]
-
-    return operacionais
 
 
 def obter_execucao_entrega(execucao_id):
-    registros = supabase_request(
+    registros = supabase_user_request(
         "execucoes_entrega",
         "GET",
         params={
@@ -2499,7 +2482,7 @@ def obter_execucao_entrega(execucao_id):
 
 
 def listar_execucoes_entrega_usuario(limite=100):
-    return supabase_request(
+    return supabase_user_request(
         "execucoes_entrega",
         "GET",
         params={
@@ -2520,7 +2503,7 @@ def listar_execucoes_entrega_usuario(limite=100):
 
 
 def obter_execucao_em_andamento_usuario():
-    registros = supabase_request(
+    registros = supabase_user_request(
         "execucoes_entrega",
         "GET",
         params={
@@ -2548,7 +2531,7 @@ def obter_execucao_em_andamento_usuario():
 
 
 def listar_paradas_execucao(execucao_id):
-    return supabase_request(
+    return supabase_user_request(
         "execucoes_paradas",
         "GET",
         params={
@@ -2573,152 +2556,59 @@ def iniciar_execucao_entrega(
     rota_id=None,
     nome_rota=None,
 ):
-    ativa = obter_execucao_em_andamento_usuario()
-
-    if ativa:
-        raise RuntimeError(
-            "Você já possui uma rota em andamento. "
-            "Finalize ou cancele essa execução antes de iniciar outra."
-        )
-
-    paradas = locais_para_execucao(
-        dados
-    )
+    paradas = locais_para_execucao(dados)
 
     if not paradas:
-        raise ValueError(
-            "A rota não possui paradas para executar."
-        )
+        raise ValueError("A rota não possui paradas para executar.")
 
-    resultado = supabase_request(
-        "execucoes_entrega",
-        "POST",
-        json_body={
-            "user_id":
-                usuario_id,
-            "rota_id":
-                rota_id,
-            "nome_rota":
-                nome_rota,
-            "status":
-                "em_andamento",
-            "total_paradas":
-                len(paradas),
-            "concluidas":
-                0,
-            "dados_rota":
-                preparar_json(dados),
-        },
-        prefer="return=representation",
-    )
-
-    if not resultado:
-        raise RuntimeError(
-            "Não foi possível iniciar a execução da rota."
-        )
-
-    execucao = resultado[0]
-
-    linhas = []
-
-    for ordem, local in enumerate(
-        paradas,
-        start=1,
-    ):
-        linhas.append(
+    payload_paradas = []
+    for ordem, local in enumerate(paradas, start=1):
+        payload_paradas.append(
             {
-                "execucao_id":
-                    execucao["id"],
-                "user_id":
-                    usuario_id,
-                "ordem":
-                    ordem,
-                "tipo":
-                    local.get("tipo"),
-                "nome":
-                    str(
-                        local.get("nome")
-                        or local.get("label")
-                        or f"Parada {ordem}"
-                    ),
-                "endereco":
-                    montar_referencia_google(local),
-                "latitude":
-                    float(local["latitude"]),
-                "longitude":
-                    float(local["longitude"]),
-                "status":
-                    "pendente",
-                "observacao":
-                    local.get("observacao"),
+                "tipo": local.get("tipo"),
+                "nome": str(
+                    local.get("nome")
+                    or local.get("label")
+                    or f"Parada {ordem}"
+                ),
+                "endereco": montar_referencia_google(local),
+                "latitude": float(local["latitude"]),
+                "longitude": float(local["longitude"]),
+                "observacao": local.get("observacao"),
             }
         )
 
     try:
-        criadas = supabase_request(
-            "execucoes_paradas",
-            "POST",
-            json_body=linhas,
-            prefer="return=representation",
+        resultado = supabase_rpc(
+            "iniciar_execucao_entrega_tx",
+            {
+                "p_user_id": usuario_id,
+                "p_rota_id": rota_id,
+                "p_nome_rota": nome_rota,
+                "p_dados_rota": preparar_json(dados),
+                "p_paradas": preparar_json(payload_paradas),
+            },
         )
+    except Exception as e:
+        if "delivery_already_active" in str(e):
+            raise OperacaoUsuarioError(
+                "Você já possui uma rota em andamento. "
+                "Finalize ou cancele essa execução antes de iniciar outra."
+            ) from e
+        logger.error(
+            "Falha transacional ao iniciar execução: %s",
+            e,
+            exc_info=(type(e), e, e.__traceback__),
+        )
+        raise OperacaoUsuarioError("Não foi possível iniciar a execução da rota.") from e
 
-        if len(criadas) != len(linhas):
-            raise RuntimeError(
-                "Nem todas as paradas foram criadas."
-            )
+    if not resultado:
+        raise OperacaoUsuarioError("Não foi possível iniciar a execução da rota.")
 
-    except Exception:
-        try:
-            supabase_request(
-                "execucoes_entrega",
-                "DELETE",
-                params={
-                    "id":
-                        f"eq.{execucao['id']}",
-                    "user_id":
-                        f"eq.{usuario_id}",
-                },
-                prefer="return=representation",
-            )
-        except Exception:
-            pass
-
-        raise
-
-    return execucao
+    return resultado[0] if isinstance(resultado, list) else resultado
 
 
-def atualizar_contagem_execucao(execucao_id):
-    paradas = listar_paradas_execucao(
-        execucao_id
-    )
 
-    concluidas = sum(
-        1
-        for parada in paradas
-        if parada.get("status")
-        in ("entregue", "nao_entregue")
-    )
-
-    supabase_request(
-        "execucoes_entrega",
-        "PATCH",
-        params={
-            "id":
-                f"eq.{execucao_id}",
-            "user_id":
-                f"eq.{usuario_id}",
-        },
-        json_body={
-            "concluidas":
-                concluidas,
-            "updated_at":
-                agora_iso(),
-        },
-        prefer="return=representation",
-    )
-
-    return concluidas
 
 
 def atualizar_parada_execucao(
@@ -2727,63 +2617,42 @@ def atualizar_parada_execucao(
     status,
     observacao="",
 ):
-    status = str(
-        status
-        or ""
-    ).strip().lower()
+    status = str(status or "").strip().lower()
 
-    if status not in (
-        "pendente",
-        "entregue",
-        "nao_entregue",
-    ):
-        raise ValueError(
-            "Status da parada inválido."
+    if status not in ("pendente", "entregue", "nao_entregue"):
+        raise ValueError("Status da parada inválido.")
+
+    try:
+        resultado = supabase_rpc(
+            "atualizar_parada_execucao_tx",
+            {
+                "p_user_id": usuario_id,
+                "p_execucao_id": execucao_id,
+                "p_parada_id": parada_id,
+                "p_status": status,
+                "p_observacao": (observacao or "").strip() or None,
+            },
         )
-
-    concluida_em = (
-        None
-        if status == "pendente"
-        else agora_iso()
-    )
-
-    resultado = supabase_request(
-        "execucoes_paradas",
-        "PATCH",
-        params={
-            "id":
-                f"eq.{parada_id}",
-            "execucao_id":
-                f"eq.{execucao_id}",
-            "user_id":
-                f"eq.{usuario_id}",
-        },
-        json_body={
-            "status":
-                status,
-            "concluida_em":
-                concluida_em,
-            "observacao":
-                (
-                    (observacao or "").strip()
-                    or None
-                ),
-            "updated_at":
-                agora_iso(),
-        },
-        prefer="return=representation",
-    )
+    except Exception as e:
+        texto = str(e)
+        if "delivery_not_active" in texto:
+            raise OperacaoUsuarioError("A execução não está mais em andamento.") from e
+        if "delivery_not_found" in texto:
+            raise OperacaoUsuarioError("A execução não foi encontrada.") from e
+        if "stop_not_found" in texto:
+            raise OperacaoUsuarioError("A parada não foi encontrada.") from e
+        logger.error(
+            "Falha transacional ao atualizar parada: %s",
+            e,
+            exc_info=(type(e), e, e.__traceback__),
+        )
+        raise OperacaoUsuarioError("Não foi possível atualizar a parada.") from e
 
     if not resultado:
-        raise RuntimeError(
-            "A parada não foi encontrada."
-        )
+        raise OperacaoUsuarioError("A parada não foi encontrada.")
 
-    atualizar_contagem_execucao(
-        execucao_id
-    )
+    return resultado[0] if isinstance(resultado, list) else resultado
 
-    return resultado[0]
 
 
 def finalizar_execucao_entrega(execucao_id):
@@ -2798,12 +2667,12 @@ def finalizar_execucao_entrega(execucao_id):
     ]
 
     if pendentes:
-        raise RuntimeError(
+        raise OperacaoUsuarioError(
             "Ainda existem paradas pendentes. "
             "Marque todas como Entregue ou Não entregue antes de finalizar."
         )
 
-    resultado = supabase_request(
+    resultado = supabase_user_request(
         "execucoes_entrega",
         "PATCH",
         params={
@@ -2828,7 +2697,7 @@ def finalizar_execucao_entrega(execucao_id):
     )
 
     if not resultado:
-        raise RuntimeError(
+        raise OperacaoUsuarioError(
             "A execução não está mais em andamento."
         )
 
@@ -2836,7 +2705,7 @@ def finalizar_execucao_entrega(execucao_id):
 
 
 def cancelar_execucao_entrega(execucao_id):
-    resultado = supabase_request(
+    resultado = supabase_user_request(
         "execucoes_entrega",
         "PATCH",
         params={
@@ -2859,7 +2728,7 @@ def cancelar_execucao_entrega(execucao_id):
     )
 
     if not resultado:
-        raise RuntimeError(
+        raise OperacaoUsuarioError(
             "A execução não está mais em andamento."
         )
 
@@ -2875,85 +2744,38 @@ def registrar_execucao(
     rota_id=None,
     nome_rota=None,
 ):
+    reserva_id = dados.get("_reserva_calculo_id")
 
-    locais_base = (
-        dados.get(
-            "locais_base"
-        )
-        or
-        []
-    )
+    if not reserva_id:
+        raise RuntimeError("Cálculo sem reserva de uso associada.")
 
-    resultado = supabase_request(
-        "execucoes_rotas",
-        "POST",
-        json_body={
-            "user_id":
-                usuario_id,
+    dados_salvar = dict(dados)
+    dados_salvar.pop("_reserva_calculo_id", None)
 
-            "rota_id":
-                rota_id,
+    locais_base = dados_salvar.get("locais_base") or []
 
-            "nome_rota":
-                nome_rota,
-
-            "quantidade_locais":
-                len(
-                    locais_base
-                ),
-
-            "distancia_m":
-                float(
-                    dados.get(
-                        "distancia_m",
-                        0,
-                    )
-                ),
-
-            "duracao_s":
-                float(
-                    dados.get(
-                        "duracao_s",
-                        0,
-                    )
-                ),
-
-            "objetivo":
-                dados.get(
-                    "objetivo",
-                    "Menor distância",
-                ),
-
-            "modo":
-                dados.get(
-                    "modo",
-                    "Rápido",
-                ),
-
-            "voltar_inicio":
-                bool(
-                    dados.get(
-                        "voltar_inicio",
-                        False,
-                    )
-                ),
-
-            "dados":
-                preparar_json(
-                    dados
-                ),
+    resultado = supabase_rpc(
+        "concluir_calculo",
+        {
+            "p_execucao_id": reserva_id,
+            "p_user_id": usuario_id,
+            "p_rota_id": rota_id,
+            "p_nome_rota": nome_rota,
+            "p_quantidade_locais": len(locais_base),
+            "p_distancia_m": float(dados_salvar.get("distancia_m", 0)),
+            "p_duracao_s": float(dados_salvar.get("duracao_s", 0)),
+            "p_objetivo": dados_salvar.get("objetivo", "Menor distância"),
+            "p_modo": dados_salvar.get("modo", "Rápido"),
+            "p_voltar_inicio": bool(dados_salvar.get("voltar_inicio", False)),
+            "p_dados": preparar_json(dados_salvar),
         },
-        prefer="return=representation",
     )
 
     if not resultado:
+        raise RuntimeError("Não foi possível concluir o registro da execução.")
 
-        raise RuntimeError(
-            "Não foi possível registrar "
-            "a execução."
-        )
+    return resultado[0] if isinstance(resultado, list) else resultado
 
-    return resultado[0]
 
 
 def registrar_execucao_seguro(
@@ -2961,21 +2783,19 @@ def registrar_execucao_seguro(
     rota_id=None,
     nome_rota=None,
 ):
-
     try:
-
-        return (
-            registrar_execucao(
-                dados,
-                rota_id,
-                nome_rota,
-            ),
-            None,
+        return registrar_execucao(dados, rota_id, nome_rota), None
+    except Exception as e:
+        logger.error(
+            "Falha ao concluir registro de uso: %s",
+            e,
+            exc_info=(type(e), e, e.__traceback__),
+        )
+        return None, (
+            "Não foi possível concluir o registro do cálculo. "
+            "A reserva continua protegendo sua cota temporariamente."
         )
 
-    except Exception as e:
-
-        return None, str(e)
 
 
 def vincular_execucao_rota(
@@ -2987,7 +2807,7 @@ def vincular_execucao_rota(
     if not execucao_id:
         return
 
-    supabase_request(
+    supabase_user_request(
         "execucoes_rotas",
         "PATCH",
         params={
@@ -3027,6 +2847,9 @@ def listar_execucoes_usuario(
         "user_id":
             f"eq.{usuario_id}",
 
+        "status":
+            "eq.concluido",
+
         "order":
             "created_at.desc",
 
@@ -3052,7 +2875,7 @@ def listar_execucoes_usuario(
             f"gte.{data_limite.isoformat()}"
         )
 
-    return supabase_request(
+    return supabase_user_request(
         "execucoes_rotas",
         "GET",
         params=params,
@@ -3065,7 +2888,7 @@ def listar_execucoes_usuario(
 
 def listar_locais_salvos_usuario():
 
-    return supabase_request(
+    return supabase_user_request(
         "locais_salvos",
         "GET",
         params={
@@ -3088,7 +2911,7 @@ def listar_locais_salvos_usuario():
 
 def contar_locais_salvos_usuario():
 
-    registros = supabase_request(
+    registros = supabase_user_request(
         "locais_salvos",
         "GET",
         params={
@@ -3152,7 +2975,7 @@ def salvar_local_banco(
         nome
     )
 
-    resultado = supabase_request(
+    resultado = supabase_user_request(
         "locais_salvos",
         "POST",
         json_body={
@@ -3277,7 +3100,7 @@ def atualizar_local_banco(
             }
         )
 
-    resultado = supabase_request(
+    resultado = supabase_user_request(
         "locais_salvos",
         "PATCH",
         params={
@@ -3304,7 +3127,7 @@ def excluir_local_banco(
     local_id,
 ):
 
-    resultado = supabase_request(
+    resultado = supabase_user_request(
         "locais_salvos",
         "DELETE",
         params={
@@ -3442,7 +3265,7 @@ def salvar_locais_em_lote(
 
         return 0, ignorados
 
-    resultado = supabase_request(
+    resultado = supabase_user_request(
         "locais_salvos",
         "POST",
         json_body=novos,
@@ -3551,7 +3374,7 @@ def local_salvo_para_origem(
 
 def listar_recorrentes_usuario():
 
-    return supabase_request(
+    return supabase_user_request(
         "rotas_recorrentes",
         "GET",
         params={
@@ -3645,7 +3468,7 @@ def salvar_recorrente_banco(
             "disponível no seu plano."
         )
 
-    resultado = supabase_request(
+    resultado = supabase_user_request(
         "rotas_recorrentes",
         "POST",
         json_body={
@@ -3726,7 +3549,7 @@ def atualizar_recorrente_banco(
         )
     )
 
-    resultado = supabase_request(
+    resultado = supabase_user_request(
         "rotas_recorrentes",
         "PATCH",
         params={
@@ -3860,7 +3683,7 @@ def excluir_recorrente_banco(
 
     validar_acesso_recorrentes()
 
-    resultado = supabase_request(
+    resultado = supabase_user_request(
         "rotas_recorrentes",
         "DELETE",
         params={
@@ -4475,187 +4298,91 @@ def calcular_rota_a_partir_de_locais(
     objetivo,
     modo,
 ):
-
     if not ors_configurado:
+        raise ORSError("OpenRouteService não configurado.")
 
-        raise ORSError(
-            "OpenRouteService não configurado."
-        )
+    validar_locais_base(locais, voltar_inicio)
+    validar_permissao_calculo(len(locais), modo)
 
-    validar_permissao_calculo(
-        quantidade_locais=len(
-            locais
-        ),
+    reserva = reservar_calculo_atomico(
+        quantidade_locais=len(locais),
+        objetivo=objetivo,
         modo=modo,
+        voltar_inicio=voltar_inicio,
     )
 
-    validar_locais_base(
-        locais,
-        voltar_inicio,
-    )
+    reserva_id = reserva.get("id") if isinstance(reserva, dict) else None
 
-    coordenadas = tuple(
-        (
-            local[
-                "latitude"
-            ],
-            local[
-                "longitude"
-            ],
+    if not reserva_id:
+        raise LimiteUsoError("Não foi possível reservar seu cálculo. Tente novamente.")
+
+    try:
+        coordenadas = tuple(
+            (local["latitude"], local["longitude"])
+            for local in locais
         )
 
-        for local
-        in locais
-    )
+        start_idx = 0
+        end_idx = 0 if voltar_inicio else len(locais) - 1
 
-    start_idx = 0
-
-    end_idx = (
-        0
-        if voltar_inicio
-        else
-        len(
-            locais
-        ) - 1
-    )
-
-    matrix_data = (
-        obter_matrix_cache_v3(
+        matrix_data = obter_matrix_cache_v3(
             coordenadas,
             ORS_KEY,
         )
-    )
 
-    matrix_otimizacao = (
-        matrix_data[
-            "distancias"
-        ]
-        if objetivo
-        == "Menor distância"
-        else
-        matrix_data[
-            "duracoes"
-        ]
-    )
+        matrix_otimizacao = (
+            matrix_data["distancias"]
+            if objetivo == "Menor distância"
+            else matrix_data["duracoes"]
+        )
 
-    resultado_solver = (
-        otimizar_rota(
+        resultado_solver = otimizar_rota(
             matrix_m=matrix_otimizacao,
             start_idx=start_idx,
             end_idx=end_idx,
             modo=modo,
         )
-    )
 
-    locais_ordenados = [
-        locais[
-            indice
+        locais_ordenados = [
+            locais[indice]
+            for indice in resultado_solver["route"]
         ]
 
-        for indice
-        in resultado_solver[
-            "route"
-        ]
-    ]
-
-    coordenadas_ordenadas = tuple(
-        (
-            local[
-                "latitude"
-            ],
-            local[
-                "longitude"
-            ],
+        coordenadas_ordenadas = tuple(
+            (local["latitude"], local["longitude"])
+            for local in locais_ordenados
         )
 
-        for local
-        in locais_ordenados
-    )
-
-    rota_real = (
-        obter_directions_cache(
+        rota_real = obter_directions_cache(
             coordenadas_ordenadas,
             ORS_KEY,
         )
-    )
 
-    gap = resultado_solver.get(
-        "gap_percent"
-    )
+        gap = resultado_solver.get("gap_percent")
+        if gap is not None:
+            gap = float(gap)
 
-    if gap is not None:
+        return {
+            "versao": 14,
+            "voltar_inicio": bool(voltar_inicio),
+            "objetivo": objetivo,
+            "modo": modo,
+            "locais_base": preparar_json(locais),
+            "locais_ordenados": preparar_json(locais_ordenados),
+            "distancia_m": float(rota_real["distancia_m"]),
+            "duracao_s": float(rota_real["duracao_s"]),
+            "geometry": preparar_json(rota_real["geometry"]),
+            "solver": {
+                "status": str(resultado_solver.get("status", "")),
+                "metodo": str(resultado_solver.get("metodo", "")),
+                "gap_percent": gap,
+            },
+            "_reserva_calculo_id": reserva_id,
+        }
+    except Exception:
+        cancelar_reserva_calculo(reserva_id)
+        raise
 
-        gap = float(
-            gap
-        )
-
-    return {
-        "versao":
-            13,
-
-        "voltar_inicio":
-            bool(
-                voltar_inicio
-            ),
-
-        "objetivo":
-            objetivo,
-
-        "modo":
-            modo,
-
-        "locais_base":
-            preparar_json(
-                locais
-            ),
-
-        "locais_ordenados":
-            preparar_json(
-                locais_ordenados
-            ),
-
-        "distancia_m":
-            float(
-                rota_real[
-                    "distancia_m"
-                ]
-            ),
-
-        "duracao_s":
-            float(
-                rota_real[
-                    "duracao_s"
-                ]
-            ),
-
-        "geometry":
-            preparar_json(
-                rota_real[
-                    "geometry"
-                ]
-            ),
-
-        "solver": {
-            "status":
-                str(
-                    resultado_solver.get(
-                        "status",
-                        "",
-                    )
-                ),
-
-            "metodo":
-                str(
-                    resultado_solver.get(
-                        "metodo",
-                        "",
-                    )
-                ),
-
-            "gap_percent":
-                gap,
-        },
-    }
 
 
 # ============================================================
@@ -5008,9 +4735,7 @@ def gerar_url_google_maps(
 
 
 def gerar_url_navegacao_destino(local):
-    referencia = montar_referencia_google(
-        local
-    )
+    referencia = coordenada_google_maps(local)
 
     params = {
         "api": "1",
@@ -5019,53 +4744,19 @@ def gerar_url_navegacao_destino(local):
         "dir_action": "navigate",
     }
 
-    return (
-        "https://www.google.com/maps/dir/?"
-        + urlencode(params)
-    )
+    return "https://www.google.com/maps/dir/?" + urlencode(params)
+
 
 
 def dividir_rota_google_maps(
     locais,
     max_pontos_por_trecho=5,
 ):
+    return dividir_rota_google_maps_logic(
+        locais,
+        max_pontos_por_trecho,
+    )
 
-    if len(
-        locais
-    ) <= max_pontos_por_trecho:
-
-        return [
-            locais
-        ]
-
-    trechos = []
-    inicio = 0
-
-    while inicio < len(
-        locais
-    ) - 1:
-
-        fim = min(
-            inicio
-            +
-            max_pontos_por_trecho
-            -
-            1,
-            len(
-                locais
-            ) - 1,
-        )
-
-        trechos.append(
-            locais[
-                inicio:
-                fim + 1
-            ]
-        )
-
-        inicio = fim
-
-    return trechos
 
 
 def dataframe_rota_otimizada(
@@ -5313,11 +5004,9 @@ def renderizar_resultado_rota(
                     st.rerun()
 
                 except Exception as e:
-
-                    st.error(
-                        str(
-                            e
-                        )
+                    mostrar_erro_usuario(
+                        "Falha em operação administrativa",
+                        e,
                     )
 
         with col2:
@@ -5365,11 +5054,9 @@ def renderizar_resultado_rota(
                     )
 
                 except Exception as e:
-
-                    st.error(
-                        str(
-                            e
-                        )
+                    mostrar_erro_usuario(
+                        "Falha em operação administrativa",
+                        e,
                     )
 
     st.subheader(
@@ -5503,8 +5190,9 @@ def renderizar_resultado_rota(
                 st.rerun()
 
             except Exception as e:
-                st.error(
-                    str(e)
+                mostrar_erro_usuario(
+                    "Falha ao iniciar execução",
+                    e,
                 )
 
     st.subheader(
@@ -5576,11 +5264,9 @@ def renderizar_resultado_rota(
                     st.rerun()
 
                 except Exception as e:
-
-                    st.error(
-                        str(
-                            e
-                        )
+                    mostrar_erro_usuario(
+                        "Falha em operação administrativa",
+                        e,
                     )
 
     else:
@@ -5602,12 +5288,11 @@ def renderizar_resultado_rota(
         )
 
     except Exception as e:
-
-        st.error(
-            "Não foi possível montar o mapa: "
-            f"{e}"
+        mostrar_erro_usuario(
+            "Falha ao montar mapa",
+            e,
+            "Não foi possível montar o mapa.",
         )
-
         return
 
     st.subheader(
@@ -5913,11 +5598,9 @@ def renderizar_assinatura_atual():
                     st.rerun()
 
                 except Exception as e:
-
-                    st.error(
-                        str(
-                            e
-                        )
+                    mostrar_erro_usuario(
+                        "Falha em operação administrativa",
+                        e,
                     )
 
         with c2:
@@ -5967,11 +5650,9 @@ def renderizar_assinatura_atual():
                         st.rerun()
 
                     except Exception as e:
-
-                        st.error(
-                            str(
-                                e
-                            )
+                        mostrar_erro_usuario(
+                            "Falha na operação",
+                            e,
                         )
 
 
@@ -5993,13 +5674,10 @@ def renderizar_planos():
         )
 
     except Exception as e:
-
-        st.error(
-            str(
-                e
-            )
+        mostrar_erro_usuario(
+            "Falha ao carregar página",
+            e,
         )
-
         return
 
     plano_atual = (
@@ -6238,11 +5916,9 @@ def renderizar_planos():
                                     )
 
                         except Exception as e:
-
-                            st.error(
-                                str(
-                                    e
-                                )
+                            mostrar_erro_usuario(
+                                "Falha no fluxo de pagamento",
+                                e,
                             )
 
     if st.session_state.mp_checkout_url:
@@ -6347,13 +6023,10 @@ def renderizar_historico():
         )
 
     except Exception as e:
-
-        st.error(
-            str(
-                e
-            )
+        mostrar_erro_usuario(
+            "Falha ao carregar página",
+            e,
         )
-
         return
 
     total_km = (
@@ -6487,13 +6160,10 @@ def renderizar_locais_salvos():
         )
 
     except Exception as e:
-
-        st.error(
-            str(
-                e
-            )
+        mostrar_erro_usuario(
+            "Falha ao carregar página",
+            e,
         )
-
         return
 
     editando_endereco = None
@@ -6902,13 +6572,10 @@ def renderizar_minhas_rotas():
         )
 
     except Exception as e:
-
-        st.error(
-            str(
-                e
-            )
+        mostrar_erro_usuario(
+            "Falha ao carregar página",
+            e,
         )
-
         return
 
     if not rotas:
@@ -7075,11 +6742,9 @@ def renderizar_minhas_rotas():
                         st.rerun()
 
                     except Exception as e:
-
-                        st.error(
-                            str(
-                                e
-                            )
+                        mostrar_erro_usuario(
+                            "Falha na operação",
+                            e,
                         )
 
             with st.expander(
@@ -7473,11 +7138,9 @@ def renderizar_recorrentes():
                         st.rerun()
 
                     except Exception as e:
-
-                        st.error(
-                            str(
-                                e
-                            )
+                        mostrar_erro_usuario(
+                            "Falha na operação",
+                            e,
                         )
 
     if st.button(
@@ -7613,11 +7276,9 @@ def renderizar_recorrentes():
                     st.rerun()
 
                 except Exception as e:
-
-                    st.error(
-                        str(
-                            e
-                        )
+                    mostrar_erro_usuario(
+                        "Falha em operação administrativa",
+                        e,
                     )
 
     st.divider()
@@ -7698,11 +7359,9 @@ def renderizar_recorrentes():
                         st.rerun()
 
                     except Exception as e:
-
-                        st.error(
-                            str(
-                                e
-                            )
+                        mostrar_erro_usuario(
+                            "Falha na operação",
+                            e,
                         )
 
             with st.expander(
@@ -7899,11 +7558,9 @@ def renderizar_edicao_rota():
             st.rerun()
 
         except Exception as e:
-
-            st.error(
-                str(
-                    e
-                )
+            mostrar_erro_usuario(
+                "Falha na operação",
+                e,
             )
 
 
@@ -7912,32 +7569,19 @@ def renderizar_edicao_rota():
 # ============================================================
 
 def listar_usuarios_admin():
-
-    if not usuario_e_admin:
-
-        raise PermissionError(
-            "Acesso não autorizado."
-        )
-
-    return supabase_request(
+    return supabase_admin_request(
         "usuarios_app",
         "GET",
         params={
-            "select":
-                (
-                    "user_id,nome,email,plano,"
-                    "ativo,limite_rotas_mes,"
-                    "limite_locais_rota,"
-                    "permite_preciso,"
-                    "usar_limites_personalizados,"
-                    "is_admin,"
-                    "created_at,updated_at"
-                ),
-
-            "order":
-                "created_at.desc",
+            "select": (
+                "user_id,nome,email,plano,ativo,limite_rotas_mes,"
+                "limite_locais_rota,permite_preciso,usar_limites_personalizados,"
+                "is_admin,created_at,updated_at"
+            ),
+            "order": "created_at.desc",
         },
     )
+
 
 
 def atualizar_usuario_admin(
@@ -7949,62 +7593,27 @@ def atualizar_usuario_admin(
     limite_locais,
     permite_preciso,
 ):
-
-    if not usuario_e_admin:
-
-        raise PermissionError(
-            "Acesso não autorizado."
-        )
-
-    resultado = supabase_request(
+    resultado = supabase_admin_request(
         "usuarios_app",
         "PATCH",
-        params={
-            "user_id":
-                f"eq.{user_id_alvo}",
-        },
+        params={"user_id": f"eq.{user_id_alvo}"},
         json_body={
-            "plano":
-                plano,
-
-            "ativo":
-                bool(
-                    ativo
-                ),
-
-            "usar_limites_personalizados":
-                bool(
-                    personalizado
-                ),
-
-            "limite_rotas_mes":
-                int(
-                    limite_rotas
-                ),
-
-            "limite_locais_rota":
-                int(
-                    limite_locais
-                ),
-
-            "permite_preciso":
-                bool(
-                    permite_preciso
-                ),
-
-            "updated_at":
-                agora_iso(),
+            "plano": plano,
+            "ativo": bool(ativo),
+            "usar_limites_personalizados": bool(personalizado),
+            "limite_rotas_mes": int(limite_rotas),
+            "limite_locais_rota": int(limite_locais),
+            "permite_preciso": bool(permite_preciso),
+            "updated_at": agora_iso(),
         },
         prefer="return=representation",
     )
 
     if not resultado:
-
-        raise RuntimeError(
-            "Usuário não encontrado."
-        )
+        raise RuntimeError("Usuário não encontrado.")
 
     return resultado[0]
+
 
 
 def atualizar_plano_admin(
@@ -8018,91 +7627,44 @@ def atualizar_plano_admin(
     permite_exportacoes,
     preco_mensal,
 ):
-
-    if not usuario_e_admin:
-
-        raise PermissionError(
-            "Acesso não autorizado."
-        )
-
     if nome == "Gratuito":
-
         preco_mensal = 0
 
-    resultado = supabase_request(
+    resultado = supabase_admin_request(
         "planos",
         "PATCH",
-        params={
-            "nome":
-                f"eq.{nome}",
-        },
+        params={"nome": f"eq.{nome}"},
         json_body={
-            "limite_rotas_mes":
-                int(
-                    limite_rotas
-                ),
-
-            "limite_locais_rota":
-                int(
-                    limite_locais
-                ),
-
-            "permite_preciso":
-                bool(
-                    permite_preciso
-                ),
-
-            "permite_recorrentes":
-                bool(
-                    permite_recorrentes
-                ),
-
-            "historico_dias":
-                (
-                    None
-                    if historico_completo
-                    else
-                    int(
-                        historico_dias
-                    )
-                ),
-
-            "permite_exportacoes":
-                bool(
-                    permite_exportacoes
-                ),
-
-            "preco_mensal":
-                float(
-                    preco_mensal
-                ),
-
-            "moeda":
-                "BRL",
-
-            "updated_at":
-                agora_iso(),
+            "limite_rotas_mes": int(limite_rotas),
+            "limite_locais_rota": int(limite_locais),
+            "permite_preciso": bool(permite_preciso),
+            "permite_recorrentes": bool(permite_recorrentes),
+            "historico_dias": None if historico_completo else int(historico_dias),
+            "permite_exportacoes": bool(permite_exportacoes),
+            "preco_mensal": float(preco_mensal),
+            "moeda": "BRL",
+            "updated_at": agora_iso(),
         },
         prefer="return=representation",
     )
 
     if not resultado:
-
-        raise RuntimeError(
-            "Plano não encontrado."
-        )
+        raise RuntimeError("Plano não encontrado.")
 
     return resultado[0]
 
 
+
 def renderizar_administracao():
 
-    if not usuario_e_admin:
-
-        st.error(
-            "Acesso não autorizado."
+    try:
+        exigir_admin_atual()
+    except Exception as e:
+        mostrar_erro_usuario(
+            "Tentativa de acesso administrativo",
+            e,
+            "Acesso não autorizado.",
         )
-
         return
 
     st.subheader(
@@ -8120,32 +7682,31 @@ def renderizar_administracao():
         )
 
     except Exception as e:
-
-        st.error(
-            str(
-                e
-            )
+        mostrar_erro_usuario(
+            "Falha ao carregar página",
+            e,
         )
-
         return
 
-    total_uso = 0
+    try:
+        uso_por_usuario = resumo_uso_mes_admin()
+        assinaturas_admin = listar_assinaturas_admin()
+    except Exception as e:
+        logger.error(
+            "Falha ao carregar resumo administrativo: %s",
+            e,
+            exc_info=(type(e), e, e.__traceback__),
+        )
+        uso_por_usuario = {}
+        assinaturas_admin = []
 
-    for usuario in usuarios:
+    assinatura_por_usuario = {}
+    for assinatura_item in assinaturas_admin:
+        uid = assinatura_item.get("user_id")
+        if uid and uid not in assinatura_por_usuario:
+            assinatura_por_usuario[uid] = assinatura_item
 
-        try:
-
-            total_uso += (
-                contar_execucoes_mes_usuario(
-                    usuario[
-                        "user_id"
-                    ]
-                )
-            )
-
-        except Exception:
-
-            pass
+    total_uso = sum(uso_por_usuario.values())
 
     c1, c2, c3 = (
         st.columns(
@@ -8379,11 +7940,9 @@ def renderizar_administracao():
                     st.rerun()
 
                 except Exception as e:
-
-                    st.error(
-                        str(
-                            e
-                        )
+                    mostrar_erro_usuario(
+                        "Falha em operação administrativa",
+                        e,
                     )
 
     st.divider()
@@ -8444,33 +8003,24 @@ def renderizar_administracao():
 
             continue
 
-        efetivo = perfil_efetivo(
-            usuario
+        plano_usuario = next(
+            (p for p in planos if p.get("nome") == (usuario.get("plano") or "Gratuito")),
+            None,
         )
 
-        uso = (
-            contar_execucoes_mes_usuario(
-                usuario[
-                    "user_id"
-                ]
-            )
+        efetivo = resolver_perfil_efetivo(
+            usuario,
+            plano_usuario,
         )
 
-        assinatura = None
+        uso = uso_por_usuario.get(
+            usuario["user_id"],
+            0,
+        )
 
-        try:
-
-            assinatura = (
-                obter_assinatura_atual(
-                    usuario[
-                        "user_id"
-                    ]
-                )
-            )
-
-        except Exception:
-
-            pass
+        assinatura = assinatura_por_usuario.get(
+            usuario["user_id"]
+        )
 
         titulo = (
             usuario.get(
@@ -8623,11 +8173,14 @@ def renderizar_administracao():
                     ),
                 )
 
-                plano_selecionado = (
-                    obter_plano(
-                        plano
-                    )
+                plano_selecionado = next(
+                    (p for p in planos if p.get("nome") == plano),
+                    None,
                 )
+
+                if not plano_selecionado:
+                    st.error("Plano selecionado não encontrado.")
+                    continue
 
                 if personalizado:
 
@@ -8739,11 +8292,9 @@ def renderizar_administracao():
                         st.rerun()
 
                     except Exception as e:
-
-                        st.error(
-                            str(
-                                e
-                            )
+                        mostrar_erro_usuario(
+                            "Falha na operação",
+                            e,
                         )
 
 
@@ -9381,11 +8932,9 @@ else:
                     )
 
         except Exception as e:
-
-            st.error(
-                str(
-                    e
-                )
+            mostrar_erro_usuario(
+                "Falha na operação",
+                e,
             )
 
 
@@ -9579,10 +9128,10 @@ if st.button(
         )
 
     except Exception as e:
-
-        st.error(
-            "Não foi possível calcular: "
-            f"{e}"
+        mostrar_erro_usuario(
+            "Falha inesperada no cálculo",
+            e,
+            "Não foi possível calcular a rota. Tente novamente.",
         )
 
 
