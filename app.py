@@ -4079,37 +4079,12 @@ def buscar_sugestoes(searchterm, focus_lat=None, focus_lon=None):
 
 
 def campo_local(chave, label, placeholder, focus=None):
-    """Seleciona endereço ou cria um ponto exato sem usar geocodificação."""
-    coordenadas_ativas = st.checkbox(
-        f"📍 {label}: inserir por coordenadas",
-        key=f"{chave}__modo_coordenadas",
-        help="Permite misturar endereços pesquisados e coordenadas na mesma rota.",
-    )
-    if coordenadas_ativas:
-        lat_col, lon_col = st.columns(2)
-        with lat_col:
-            latitude = st.text_input(
-                f"{label} — Latitude", key=f"{chave}__latitude",
-                placeholder="-27.098500",
-            )
-        with lon_col:
-            longitude = st.text_input(
-                f"{label} — Longitude", key=f"{chave}__longitude",
-                placeholder="-48.912300",
-            )
-        nome = st.text_input(
-            f"{label} — Identificação (opcional)",
-            key=f"{chave}__nome_coordenada",
-            placeholder="Ex.: Entrega do cliente João",
-        )
-        if not str(latitude).strip() and not str(longitude).strip():
-            return None
-        try:
-            return criar_local_por_coordenadas(latitude, longitude, nome)
-        except ValueError as erro:
-            st.warning(f"{label}: {erro}")
-            return None
+    """Recebe endereço pesquisado ou par latitude/longitude no mesmo campo.
 
+    `default_use_searchterm` preserva o texto digitado no searchbox;
+    coordenadas completas são reconhecidas sem escolher uma sugestão.
+    Outros textos só viram local após selecionar um endereço geocodificado.
+    """
     focus_lat = focus.get("latitude") if focus else None
     focus_lon = focus.get("longitude") if focus else None
     selecionado = st_searchbox(
@@ -4120,9 +4095,12 @@ def campo_local(chave, label, placeholder, focus=None):
         debounce=850,
         clear_on_submit=False,
         edit_after_submit="option",
+        default_use_searchterm=True,
         focus_lat=focus_lat,
         focus_lon=focus_lon,
     )
+    if isinstance(selecionado, str):
+        return interpretar_texto_coordenadas(selecionado)
     return selecionado
 
 
@@ -5203,60 +5181,144 @@ def dataframe_rota_otimizada(
     )
 
 
-def gerar_excel_rota(
-    dataframe,
-    dados,
-):
+def gerar_excel_rota(dataframe, dados):
+    """Excel com a rota otimizada visível ao abrir e o resumo em outra aba.
 
+    A aba Rota é sempre a primeira e contém todas as paradas na ordem real
+    calculada, inclusive o retorno ao início quando a rota é circular.
+    """
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    if not isinstance(dataframe, pd.DataFrame):
+        dataframe = pd.DataFrame(dataframe)
+
+    # Compatibilidade com resultados antigos salvos no histórico.
+    if dataframe.empty:
+        ordenados = dados.get("locais_ordenados") or []
+        if ordenados:
+            dataframe = dataframe_rota_otimizada(
+                ordenados, bool(dados.get("voltar_inicio", False))
+            )
+    if dataframe.empty:
+        raise ValueError(
+            "Não há paradas na rota calculada para exportar ao Excel."
+        )
+
+    colunas = [
+        "ordem", "tipo", "local", "endereco",
+        "observacao", "latitude", "longitude",
+    ]
+    rotulos = {
+        "ordem": "Nº",
+        "tipo": "Tipo",
+        "local": "Local",
+        "endereco": "Endereço",
+        "observacao": "Observação",
+        "latitude": "Latitude",
+        "longitude": "Longitude",
+    }
+    planilha_rota = dataframe.reindex(columns=colunas).rename(columns=rotulos)
+
+    # Evita interpretação de texto fornecido por usuários como fórmula Excel.
+    # Coordenadas numéricas permanecem números, com precisão preservada.
+    def texto_seguro(valor):
+        if isinstance(valor, str) and valor.lstrip().startswith(("=", "+", "-", "@")):
+            return "'" + valor
+        return valor
+
+    for coluna in ("Tipo", "Local", "Endereço", "Observação"):
+        planilha_rota[coluna] = planilha_rota[coluna].map(texto_seguro)
+
+    distancia_km, tempo = dados_metricas(dados)
+    objetivo = dados.get("objetivo") or "—"
+    modo = dados.get("modo") or "—"
+
+    resumo = pd.DataFrame([{
+        "Distância total (km)": round(distancia_km, 2),
+        "Tempo estimado": tempo,
+        "Objetivo": objetivo,
+        "Modo": modo,
+        "Quantidade de pontos na sequência": len(planilha_rota),
+    }])
     buffer = io.BytesIO()
 
-    distancia_km, tempo = (
-        dados_metricas(
-            dados
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        # IMPORTANTÍSSIMO: a primeira aba é a Rota, e não o Resumo.
+        # A tabela começa na linha 6, abaixo dos indicadores principais.
+        planilha_rota.to_excel(
+            writer, sheet_name="Rota", index=False, startrow=5,
         )
-    )
+        resumo.to_excel(writer, sheet_name="Resumo", index=False)
 
-    resumo = pd.DataFrame(
-        [
-            {
-                "Distância total (km)":
-                    round(
-                        distancia_km,
-                        2,
-                    ),
+        workbook = writer.book
+        workbook.active = 0
+        aba_rota = writer.sheets["Rota"]
+        aba_rota.sheet_view.showGridLines = False
+        aba_rota.sheet_view.tabSelected = True
+        writer.sheets["Resumo"].sheet_view.tabSelected = False
 
-                "Tempo estimado":
-                    tempo,
+        aba_rota.merge_cells("A1:G1")
+        titulo = aba_rota["A1"]
+        titulo.value = "ROTA OTIMIZADA — ORDEM DE VISITA"
+        titulo.font = Font(name="Aptos", size=16, bold=True, color="FFFFFF")
+        titulo.fill = PatternFill("solid", fgColor="16324F")
+        titulo.alignment = Alignment(vertical="center")
+        aba_rota.row_dimensions[1].height = 32
 
-                "Objetivo":
-                    dados.get(
-                        "objetivo"
-                    ),
-
-                "Modo":
-                    dados.get(
-                        "modo"
-                    ),
-            }
-        ]
-    )
-
-    with pd.ExcelWriter(
-        buffer,
-        engine="openpyxl",
-    ) as writer:
-
-        resumo.to_excel(
-            writer,
-            sheet_name="Resumo",
-            index=False,
+        indicadores = (
+            ("A3", "Pontos", "B3", len(planilha_rota)),
+            ("C3", "Distância (km)", "D3", round(distancia_km, 2)),
+            ("E3", "Tempo estimado", "F3", tempo),
+            ("A4", "Objetivo", "B4", objetivo),
+            ("C4", "Modo", "D4", modo),
         )
+        for pos_label, label, pos_valor, valor in indicadores:
+            cel_label = aba_rota[pos_label]
+            cel_valor = aba_rota[pos_valor]
+            cel_label.value = label
+            cel_label.font = Font(name="Aptos", size=10, bold=True, color="34516B")
+            cel_valor.value = texto_seguro(valor)
+            cel_valor.font = Font(name="Aptos", size=10, bold=True, color="192D40")
 
-        dataframe.to_excel(
-            writer,
-            sheet_name="Rota",
-            index=False,
-        )
+        linha_cabecalho = 6
+        ultima_linha = linha_cabecalho + len(planilha_rota)
+        for cel in aba_rota[linha_cabecalho]:
+            cel.fill = PatternFill("solid", fgColor="255B82")
+            cel.font = Font(name="Aptos", bold=True, color="FFFFFF")
+            cel.alignment = Alignment(vertical="center")
+        aba_rota.row_dimensions[linha_cabecalho].height = 23
+
+        larguras = (9, 14, 35, 55, 37, 18, 18)
+        for i, largura in enumerate(larguras, start=1):
+            aba_rota.column_dimensions[get_column_letter(i)].width = largura
+
+        for linha in range(linha_cabecalho + 1, ultima_linha + 1):
+            for coluna in range(1, 8):
+                cel = aba_rota.cell(row=linha, column=coluna)
+                cel.alignment = Alignment(vertical="top", wrap_text=coluna in (3, 4, 5))
+                if linha % 2 == 0:
+                    cel.fill = PatternFill("solid", fgColor="F2F6FA")
+            for coluna in (6, 7):
+                aba_rota.cell(row=linha, column=coluna).number_format = "0.0000000"
+            aba_rota.row_dimensions[linha].height = 28
+
+        aba_rota.auto_filter.ref = f"A{linha_cabecalho}:G{ultima_linha}"
+        aba_rota.freeze_panes = "A7"
+        aba_rota.print_title_rows = "1:6"
+        aba_rota.sheet_properties.pageSetUpPr.fitToPage = True
+        aba_rota.page_setup.fitToWidth = 1
+        aba_rota.sheet_properties.tabColor = "255B82"
+
+        aba_resumo = writer.sheets["Resumo"]
+        aba_resumo.sheet_view.showGridLines = False
+        aba_resumo.freeze_panes = "A2"
+        for cel in aba_resumo[1]:
+            cel.fill = PatternFill("solid", fgColor="255B82")
+            cel.font = Font(name="Aptos", bold=True, color="FFFFFF")
+        for i, largura in enumerate((25, 24, 25, 16, 38), start=1):
+            aba_resumo.column_dimensions[get_column_letter(i)].width = largura
+        aba_resumo.sheet_properties.tabColor = "8999AA"
 
     return buffer.getvalue()
 
@@ -5721,7 +5783,9 @@ def renderizar_resultado_rota(
             st.download_button(
                 "⬇️ Excel",
                 data=excel_bytes,
-                file_name="rota.xlsx",
+                file_name="rota_otimizada.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help="Inclui todas as paradas na ordem otimizada e uma aba de resumo.",
                 use_container_width=True,
             )
 
@@ -8815,8 +8879,8 @@ st.text_input(
           "A precisão continua dependendo da cobertura cartográfica."),
 )
 st.caption(
-    "Para locais sem endereço confiável, use **📍 inserir por coordenadas** "
-    "ou pesquise no formato `-27.0985, -48.9123`. "
+    "Digite o endereço **ou as coordenadas diretamente no mesmo campo**, "
+    "no formato `-27.0985, -48.9123` (latitude, longitude). "
     'No CSV, coloque coordenadas entre aspas: `"-27.0985, -48.9123"`.'
 )
 
@@ -8835,7 +8899,7 @@ if modo_entrada == "Digitar manualmente":
     ponto_inicio = campo_local(
         chave=f"inicio_{st.session_state.form_version}_{st.session_state.manual_campos_version}",
         label="1. Ponto inicial",
-        placeholder="Digite pelo menos 4 letras, rua, número e cidade...",
+        placeholder="Endereço completo ou latitude, longitude...",
     )
 
     col_adicionar, col_remover = st.columns(2)
@@ -8856,7 +8920,7 @@ if modo_entrada == "Digitar manualmente":
         paradas.append(campo_local(
             chave=f"parada_{st.session_state.form_version}_{st.session_state.manual_campos_version}_{i}",
             label=f"{i + 2}. Parada {i + 1}",
-            placeholder="Digite rua, número e cidade ou use coordenadas...",
+            placeholder="Endereço completo ou latitude, longitude...",
             focus=ponto_inicio,
         ))
 
@@ -8872,7 +8936,7 @@ if modo_entrada == "Digitar manualmente":
         ponto_fim = campo_local(
             chave=f"fim_{st.session_state.form_version}_{st.session_state.manual_campos_version}",
             label=f"{numero_fim}. Ponto final",
-            placeholder="Digite rua, número e cidade ou use coordenadas...",
+            placeholder="Endereço completo ou latitude, longitude...",
             focus=ponto_inicio,
         )
 
