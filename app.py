@@ -1199,15 +1199,14 @@ def renderizar_execucao_entrega_detalhe(execucao_id):
                 use_container_width=True,
             )
 
-            if st.toggle(
-                "🗺️ Mostrar mapa do trecho anterior até esta parada",
-                key=f"mostrar_trecho_{execucao_id}_{parada['id']}",
-            ):
-                mostrar_mapa_trecho_execucao(
-                    origem_por_parada.get(parada["id"]),
-                    parada,
-                    f"lista_{execucao_id}_{parada['id']}",
-                )
+            # O mapa de cada trecho faz parte obrigatória dos detalhes
+            # da parada: não há toggle, checkbox ou botão para mostrá-lo.
+            st.markdown("#### 🗺️ Mapa do trecho anterior até esta parada")
+            mostrar_mapa_trecho_execucao(
+                origem_por_parada.get(parada["id"]),
+                parada,
+                f"lista_{execucao_id}_{parada['id']}",
+            )
 
             if em_andamento:
                 obs_edicao = st.text_area(
