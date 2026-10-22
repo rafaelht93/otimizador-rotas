@@ -3,6 +3,7 @@ import html
 import io
 import json
 import logging
+import math
 import re
 import threading
 import unicodedata
@@ -199,6 +200,7 @@ def init_state(nome, valor):
 init_state("pagina_app", "nova")
 init_state("num_paradas", 1)
 init_state("form_version", 0)
+init_state("manual_campos_version", 0)
 
 init_state("resultado_rota", None)
 init_state("rota_atual_id", None)
@@ -444,6 +446,111 @@ def rolar_para_topo_ao_trocar_pagina():
         """,
         unsafe_allow_javascript=True,
     )
+
+
+# ============================================================
+# BUSCA DE ENDEREÇOS E COORDENADAS
+# ============================================================
+
+def converter_texto_coordenada(valor):
+    """Aceita vírgula decimal brasileira ou ponto decimal."""
+    return float(str(valor).strip().replace(",", "."))
+
+
+def criar_local_por_coordenadas(latitude, longitude, nome=""):
+    try:
+        lat = converter_texto_coordenada(latitude)
+        lon = converter_texto_coordenada(longitude)
+    except (TypeError, ValueError) as erro:
+        raise ValueError("Latitude e longitude devem ser números válidos.") from erro
+
+    if not math.isfinite(lat) or not math.isfinite(lon):
+        raise ValueError("As coordenadas devem ser números finitos.")
+    if not -90 <= lat <= 90 or not -180 <= lon <= 180:
+        raise ValueError("Latitude deve estar entre -90 e 90; longitude entre -180 e 180.")
+
+    titulo = str(nome or "").strip() or f"Coordenadas: {lat:.6f}, {lon:.6f}"
+    return {
+        "label": titulo, "nome": titulo,
+        "latitude": lat, "longitude": lon,
+        "layer": "coordinate", "name": titulo,
+        "street": None, "housenumber": None,
+        "locality": None, "region": None, "country": "Brasil",
+    }
+
+
+def interpretar_texto_coordenadas(texto):
+    """Aceita lat,lon (com ponto) ou lat;lon (com vírgula decimal)."""
+    texto = str(texto or "").strip().lstrip("@")
+    if not texto:
+        return None
+    if ";" in texto:
+        partes = texto.split(";")
+    elif re.fullmatch(r"\s*[+-]?\d+(?:\.\d+)?\s*,\s*[+-]?\d+(?:\.\d+)?\s*", texto):
+        partes = texto.split(",")
+    else:
+        partes = texto.split()
+    if len(partes) != 2:
+        return None
+    try:
+        return criar_local_por_coordenadas(partes[0], partes[1])
+    except ValueError:
+        return None
+
+
+def limpar_enderecos_manuais_apos_importacao():
+    """Evita que campos antigos reapareçam ao voltar à entrada manual."""
+    prefixos = ("inicio_", "fim_", "parada_")
+    for chave in list(st.session_state.keys()):
+        if chave.startswith(prefixos):
+            del st.session_state[chave]
+    st.session_state.num_paradas = 1
+    st.session_state.manual_campos_version = (
+        st.session_state.get("manual_campos_version", 0) + 1
+    )
+
+
+def ordenar_resultados_enderecos(resultados, texto, cidade_referencia=""):
+    """Prefere rua+número corretos e a cidade declarada; não remove alternativas."""
+    cidade = normalizar_texto(cidade_referencia).split(",")[0].strip()
+    consulta = normalizar_texto(texto)
+    numeros = re.findall(r"(?<!\w)\d{1,6}(?!\w)", consulta)
+    numero = next((n for n in reversed(numeros) if len(n) <= 5), "")
+    vistos = set()
+    unicos = []
+    for indice, item in enumerate(resultados):
+        try:
+            coord = (round(float(item["latitude"]), 7), round(float(item["longitude"]), 7))
+        except (TypeError, ValueError, KeyError):
+            continue
+        identidade = (coord, str(item.get("housenumber") or ""), normalizar_texto(item.get("label", "")))
+        if identidade in vistos:
+            continue
+        vistos.add(identidade)
+        layer = str(item.get("layer") or "")
+        nota = 0
+        localidade = normalizar_texto(item.get("locality") or "")
+        endereco = normalizar_texto(item.get("label") or "")
+        rua = normalizar_texto(item.get("street") or "")
+        if cidade and (cidade in localidade or cidade in endereco):
+            nota += 9
+        if layer == "address":
+            nota += 3
+        elif layer in {"venue", "street"}:
+            nota += 1
+        if numero:
+            num_encontrado = re.sub(r"\D", "", str(item.get("housenumber") or ""))
+            if num_encontrado == numero:
+                nota += 7
+            elif num_encontrado:
+                nota -= 6
+            elif layer == "address":
+                nota -= 2
+        if rua and len(rua) > 3 and rua in consulta:
+            nota += 3
+        unicos.append((nota, indice, item))
+    unicos.sort(key=lambda trio: (-trio[0], trio[1]))
+    return [item for _, _, item in unicos]
 
 
 # ============================================================
@@ -3859,50 +3966,56 @@ def excluir_recorrente_banco(
 # ORS / AUTOCOMPLETE
 # ============================================================
 
-@st.cache_data(
-    ttl=300,
-    show_spinner=False,
-)
-def buscar_sugestoes_cache(
-    texto,
-    focus_lat,
-    focus_lon,
-    _api_key,
-):
+@st.cache_data(ttl=300, show_spinner=False)
+def buscar_sugestoes_cache(texto, focus_lat, focus_lon, cidade_referencia, _api_key):
+    """Combina autocomplete e busca exata para aumentar acerto de endereço."""
+    coordenada = interpretar_texto_coordenadas(texto)
+    if coordenada:
+        return [coordenada]
 
-    return autocomplete_enderecos(
-        texto=texto,
-        api_key=_api_key,
-        limite=8,
-        focus_lat=focus_lat,
-        focus_lon=focus_lon,
+    sugestoes = autocomplete_enderecos(
+        texto=texto, api_key=_api_key, limite=12,
+        focus_lat=focus_lat, focus_lon=focus_lon,
     )
+    # O endpoint de busca completa tem melhor interpretação de rua/número;
+    # é acionado apenas em consultas mais específicas, não a cada letra.
+    consulta_completa = (
+        len(texto) >= 9
+        and (bool(re.search(r"\d", texto)) or "," in texto)
+    )
+    if consulta_completa or len(sugestoes) < 3:
+        consulta = texto
+        cidade = str(cidade_referencia or "").strip()
+        if cidade and normalizar_texto(cidade.split(",")[0]) not in normalizar_texto(texto):
+            consulta = f"{texto}, {cidade}"
+        try:
+            completos = buscar_enderecos(
+                texto=consulta, api_key=_api_key, limite=12,
+                focus_lat=focus_lat, focus_lon=focus_lon,
+            )
+            sugestoes = completos + sugestoes
+        except ORSError:
+            # Não perde os resultados do autocomplete se a segunda chamada falhar.
+            logger.warning("Busca completa indisponível; usando autocomplete")
+    return ordenar_resultados_enderecos(sugestoes, texto, cidade_referencia)[:15]
 
 
-@st.cache_data(
-    ttl=3600,
-    show_spinner=False,
-)
+@st.cache_data(ttl=3600, show_spinner=False)
 def buscar_endereco_importado_cache_v2(
-    texto,
-    _api_key,
-    cache_version="import-search-v2",
+    texto, _api_key, cidade_referencia="", cache_version="import-search-v3",
 ):
-    """
-    Geocodifica endereços completos importados de CSV/XLSX.
-
-    Diferente dos campos digitados manualmente, que usam
-    autocomplete, a importação recebe endereços completos.
-    Por isso usa o endpoint /search do Pelias, evitando que
-    termos genéricos no início (ex.: "Centro") dominem
-    todos os resultados.
-    """
-
-    return buscar_enderecos(
-        texto=texto,
-        api_key=_api_key,
-        limite=6,
-    )
+    """CSV/XLSX: prioriza busca de endereço completo, com contexto opcional."""
+    coordenada = interpretar_texto_coordenadas(texto)
+    if coordenada:
+        return [coordenada]
+    cidade = str(cidade_referencia or "").strip()
+    consulta = texto
+    if cidade and normalizar_texto(cidade.split(",")[0]) not in normalizar_texto(texto):
+        consulta = f"{texto}, {cidade}"
+    candidatos = buscar_enderecos(texto=consulta, api_key=_api_key, limite=12)
+    if consulta != texto and len(candidatos) < 3:
+        candidatos += buscar_enderecos(texto=texto, api_key=_api_key, limite=8)
+    return ordenar_resultados_enderecos(candidatos, texto, cidade)[:12]
 
 
 @st.cache_data(
@@ -3941,112 +4054,76 @@ def obter_directions_cache_v3(
     )
 
 
-def buscar_sugestoes(
-    searchterm,
-    focus_lat=None,
-    focus_lon=None,
-):
-
-    texto = (
-        searchterm
-        or
-        ""
-    ).strip()
-
-    if (
-        len(
-            texto
-        ) < AUTOCOMPLETE_MIN_CHARS
-        or
-        not ors_configurado
-    ):
-
+def buscar_sugestoes(searchterm, focus_lat=None, focus_lon=None):
+    texto = str(searchterm or "").strip()
+    ponto_direto = interpretar_texto_coordenadas(texto)
+    if ponto_direto:
+        return [(ponto_direto["label"], ponto_direto)]
+    if len(texto) < AUTOCOMPLETE_MIN_CHARS or not ors_configurado:
         return []
-
     try:
-
-        resultados = (
-            buscar_sugestoes_cache(
-                texto,
-                focus_lat,
-                focus_lon,
-                ORS_KEY,
-            )
+        resultados = buscar_sugestoes_cache(
+            texto, focus_lat, focus_lon,
+            st.session_state.get("cidade_referencia_busca", ""), ORS_KEY,
         )
-
         st.session_state.erro_autocomplete = None
-
-    except ORSError as e:
-
-        st.session_state.erro_autocomplete = str(e)
-        logger.warning(
-            "Falha controlada no autocomplete: %s",
-            e,
-        )
-
+    except ORSError as erro:
+        st.session_state.erro_autocomplete = str(erro)
+        logger.warning("Falha no autocomplete: %s", erro)
         return []
-
-    except Exception as e:
-
-        st.session_state.erro_autocomplete = (
-            "Não foi possível buscar sugestões agora."
-        )
-        logger.error(
-            "Falha inesperada no autocomplete: %s",
-            e,
-            exc_info=(type(e), e, e.__traceback__),
-        )
-
+    except Exception as erro:
+        st.session_state.erro_autocomplete = "Não foi possível buscar sugestões agora."
+        logger.exception("Falha inesperada no autocomplete: %s", erro)
         return []
-
-    return [
-        (
-            resultado["label"],
-            resultado,
-        )
-
-        for resultado
-        in resultados
-    ]
+    return [(resultado["label"], resultado) for resultado in resultados]
 
 
-def campo_local(
-    chave,
-    label,
-    placeholder,
-    focus=None,
-):
-
-    if focus:
-
-        focus_lat = (
-            focus.get(
-                "latitude"
+def campo_local(chave, label, placeholder, focus=None):
+    """Seleciona endereço ou cria um ponto exato sem usar geocodificação."""
+    coordenadas_ativas = st.checkbox(
+        f"📍 {label}: inserir por coordenadas",
+        key=f"{chave}__modo_coordenadas",
+        help="Permite misturar endereços pesquisados e coordenadas na mesma rota.",
+    )
+    if coordenadas_ativas:
+        lat_col, lon_col = st.columns(2)
+        with lat_col:
+            latitude = st.text_input(
+                f"{label} — Latitude", key=f"{chave}__latitude",
+                placeholder="-27.098500",
             )
-        )
-
-        focus_lon = (
-            focus.get(
-                "longitude"
+        with lon_col:
+            longitude = st.text_input(
+                f"{label} — Longitude", key=f"{chave}__longitude",
+                placeholder="-48.912300",
             )
+        nome = st.text_input(
+            f"{label} — Identificação (opcional)",
+            key=f"{chave}__nome_coordenada",
+            placeholder="Ex.: Entrega do cliente João",
         )
+        if not str(latitude).strip() and not str(longitude).strip():
+            return None
+        try:
+            return criar_local_por_coordenadas(latitude, longitude, nome)
+        except ValueError as erro:
+            st.warning(f"{label}: {erro}")
+            return None
 
-    else:
-
-        focus_lat = None
-        focus_lon = None
-
-    return st_searchbox(
+    focus_lat = focus.get("latitude") if focus else None
+    focus_lon = focus.get("longitude") if focus else None
+    selecionado = st_searchbox(
         buscar_sugestoes,
         key=chave,
         label=label,
         placeholder=placeholder,
-        debounce=700,
+        debounce=850,
         clear_on_submit=False,
         edit_after_submit="option",
         focus_lat=focus_lat,
         focus_lon=focus_lon,
     )
+    return selecionado
 
 
 # ============================================================
@@ -4318,7 +4395,7 @@ def ler_arquivo_paradas(
 
     hash_arquivo = (
         hashlib.sha256(
-            bytes_arquivo
+            arquivo.name.encode("utf-8", errors="replace") + b"\0" + bytes_arquivo
         )
         .hexdigest()[:12]
     )
@@ -6665,6 +6742,7 @@ def renderizar_locais_salvos():
         )
     )
 
+    numero_local_visivel = 0
     for local in locais:
 
         texto = normalizar_texto(
@@ -6705,12 +6783,13 @@ def renderizar_locais_salvos():
 
             continue
 
+        numero_local_visivel += 1
         with st.container(
             border=True
         ):
 
             st.markdown(
-                f"### {local['nome']}"
+                f"### {numero_local_visivel}. {local['nome']}"
             )
 
             st.write(
@@ -8727,6 +8806,20 @@ modo_entrada = st.radio(
     ),
 )
 
+st.text_input(
+    "📌 Cidade/UF para priorizar nas buscas (opcional)",
+    key="cidade_referencia_busca",
+    placeholder="Ex.: Brusque, SC — não restringe rotas a essa cidade",
+    help=("Melhora a priorização de endereços semelhantes. "
+          "Você pode informar outra cidade diretamente na busca. "
+          "A precisão continua dependendo da cobertura cartográfica."),
+)
+st.caption(
+    "Para locais sem endereço confiável, use **📍 inserir por coordenadas** "
+    "ou pesquise no formato `-27.0985, -48.9123`. "
+    'No CSV, coloque coordenadas entre aspas: `"-27.0985, -48.9123"`.'
+)
+
 ponto_inicio = None
 ponto_fim = None
 paradas = []
@@ -8737,119 +8830,50 @@ voltar_inicio = False
 # MANUAL
 # ============================================================
 
-if (
-    modo_entrada
-    ==
-    "Digitar manualmente"
-):
-
-    voltar_inicio = st.checkbox(
-        "🔄 Retornar ao ponto inicial"
+if modo_entrada == "Digitar manualmente":
+    voltar_inicio = st.checkbox("🔄 Retornar ao ponto inicial")
+    ponto_inicio = campo_local(
+        chave=f"inicio_{st.session_state.form_version}_{st.session_state.manual_campos_version}",
+        label="1. Ponto inicial",
+        placeholder="Digite pelo menos 4 letras, rua, número e cidade...",
     )
 
-    c1, c2 = (
-        st.columns(
-            2
-        )
-    )
-
-    with c1:
-
-        ponto_inicio = campo_local(
-            chave=(
-                f"inicio_"
-                f"{st.session_state.form_version}"
-            ),
-            label="Ponto inicial",
-            placeholder=(
-                "Digite pelo menos 4 letras..."
-            ),
-        )
-
-    with c2:
-
-        if voltar_inicio:
-
-            ponto_fim = ponto_inicio
-
-            st.text_input(
-                "Ponto final",
-                value=(
-                    ponto_inicio[
-                        "label"
-                    ]
-                    if ponto_inicio
-                    else
-                    ""
-                ),
-                disabled=True,
-            )
-
-        else:
-
-            ponto_fim = campo_local(
-                chave=(
-                    f"fim_"
-                    f"{st.session_state.form_version}"
-                ),
-                label="Ponto final",
-                placeholder=(
-                    "Digite pelo menos 4 letras..."
-                ),
-                focus=ponto_inicio,
-            )
-
-    c1, c2 = (
-        st.columns(
-            2
-        )
-    )
-
-    with c1:
-
-        if st.button(
-            "➕ Adicionar parada",
-            use_container_width=True,
-        ):
-
+    col_adicionar, col_remover = st.columns(2)
+    with col_adicionar:
+        if st.button("➕ Adicionar parada", use_container_width=True):
             st.session_state.num_paradas += 1
-
             st.rerun()
-
-    with c2:
-
+    with col_remover:
         if st.button(
             "➖ Remover parada",
-            disabled=(
-                st.session_state.num_paradas
-                <= 1
-            ),
+            disabled=st.session_state.num_paradas <= 1,
             use_container_width=True,
         ):
-
             st.session_state.num_paradas -= 1
-
             st.rerun()
 
-    for i in range(
-        st.session_state.num_paradas
-    ):
+    for i in range(st.session_state.num_paradas):
+        paradas.append(campo_local(
+            chave=f"parada_{st.session_state.form_version}_{st.session_state.manual_campos_version}_{i}",
+            label=f"{i + 2}. Parada {i + 1}",
+            placeholder="Digite rua, número e cidade ou use coordenadas...",
+            focus=ponto_inicio,
+        ))
 
-        paradas.append(
-            campo_local(
-                chave=(
-                    f"parada_"
-                    f"{st.session_state.form_version}_"
-                    f"{i}"
-                ),
-                label=(
-                    f"Parada {i + 1}"
-                ),
-                placeholder=(
-                    "Digite um endereço..."
-                ),
-                focus=ponto_inicio,
-            )
+    numero_fim = st.session_state.num_paradas + 2
+    if voltar_inicio:
+        ponto_fim = ponto_inicio
+        st.text_input(
+            f"{numero_fim}. Ponto final (retorno ao ponto 1)",
+            value=(ponto_inicio.get("label", "") if ponto_inicio else ""),
+            disabled=True,
+        )
+    else:
+        ponto_fim = campo_local(
+            chave=f"fim_{st.session_state.form_version}_{st.session_state.manual_campos_version}",
+            label=f"{numero_fim}. Ponto final",
+            placeholder="Digite rua, número e cidade ou use coordenadas...",
+            focus=ponto_inicio,
         )
 
 
@@ -8892,14 +8916,15 @@ elif (
             if x in mapa
         ],
         format_func=(
-            lambda x:
-            mapa[
-                x
-            ][
-                "nome"
-            ]
+            lambda x: f"{mapa[x]['nome']} — {mapa[x].get('endereco', '')}"
         ),
     )
+
+    if selecionados:
+        st.markdown("**Endereços selecionados:**")
+        for numero, identificador in enumerate(selecionados, start=1):
+            registro = mapa[identificador]
+            st.write(f"{numero}. {registro['nome']} — {registro.get('endereco', '')}")
 
     if (
         limite_locais > 0
@@ -8922,12 +8947,7 @@ elif (
             "Ponto inicial",
             selecionados,
             format_func=(
-                lambda x:
-                mapa[
-                    x
-                ][
-                    "nome"
-                ]
+                lambda x: f"{selecionados.index(x) + 1}. {mapa[x]['nome']}"
             ),
         )
 
@@ -8962,12 +8982,7 @@ elif (
                     if x != inicio_id
                 ],
                 format_func=(
-                    lambda x:
-                    mapa[
-                        x
-                    ][
-                        "nome"
-                    ]
+                    lambda x: f"{selecionados.index(x) + 1}. {mapa[x]['nome']}"
                 ),
             )
 
@@ -9006,6 +9021,7 @@ else:
         'endereco\n'
         '"Havan, Brusque, SC"\n'
         '"Prefeitura Municipal de Brusque, Brusque, SC"\n'
+        '"-27.0985, -48.9123"\n'
     )
 
     st.download_button(
@@ -9024,6 +9040,9 @@ else:
         ],
     )
 
+    if arquivo is None:
+        st.session_state.import_file_hash = None
+
     if arquivo:
 
         try:
@@ -9039,6 +9058,7 @@ else:
                 st.session_state.import_file_hash
                 != hash_arquivo
             ):
+                limpar_enderecos_manuais_apos_importacao()
                 st.session_state.import_file_hash = hash_arquivo
                 st.session_state.import_removed_indices = []
                 st.session_state.import_manual_overrides = {}
@@ -9055,6 +9075,11 @@ else:
                 in enumerate(enderecos)
                 if indice_original not in removidos
             ]
+
+            numeracao_csv = {
+                indice: pos
+                for pos, (indice, _) in enumerate(enderecos_ativos, start=1)
+            }
 
             st.caption(
                 f"{len(enderecos_ativos)} endereço(s) ativo(s) "
@@ -9112,6 +9137,7 @@ else:
                             buscar_endereco_importado_cache_v2(
                                 endereco,
                                 ORS_KEY,
+                                st.session_state.get("cidade_referencia_busca", ""),
                             )
                         for indice_original, endereco
                         in enderecos_ativos
@@ -9138,7 +9164,7 @@ else:
                                 'background:rgba(220,38,38,.10);'
                                 'padding:8px 12px;margin-bottom:6px;'
                                 'border-radius:4px;color:#dc2626">'
-                                f'🔴 <strong>Endereço repetido (item {indice_original + 1}): '
+                                f'🔴 <strong>Endereço repetido (item {numeracao_csv[indice_original]}): '
                                 f'{html.escape(endereco)}</strong></div>',
                                 unsafe_allow_html=True,
                             )
@@ -9148,7 +9174,7 @@ else:
                             ] = substituicao
 
                             st.markdown(
-                                f"**{endereco}**"
+                                f"**{numeracao_csv[indice_original]}. {endereco}**"
                             )
                             st.caption(
                                 "✏️ Local corrigido manualmente: "
@@ -9157,13 +9183,13 @@ else:
 
                         elif not candidatos:
                             st.error(
-                                "Não encontrado: "
+                                f"{numeracao_csv[indice_original]}. Não encontrado: "
                                 f"{endereco}"
                             )
 
                         else:
                             pos = st.selectbox(
-                                endereco,
+                                f"{numeracao_csv[indice_original]}. {endereco}",
                                 list(
                                     range(
                                         len(candidatos)
@@ -9318,7 +9344,7 @@ else:
 
             if duplicados_coordenadas:
                 descricoes = [
-                    f"item {indice + 1}: {enderecos[indice]}"
+                    f"item {numeracao_csv[indice]}: {enderecos[indice]}"
                     for indice in sorted(duplicados_coordenadas)
                 ]
                 st.error(
@@ -9354,7 +9380,7 @@ else:
                     key=chave_inicio,
                     format_func=(
                         lambda x:
-                        confirmados_por_id[x]["label"]
+                        f"{numeracao_csv[x]}. {confirmados_por_id[x]['label']}"
                     ),
                 )
 
@@ -9415,7 +9441,7 @@ else:
                         key=chave_fim,
                         format_func=(
                             lambda x:
-                            confirmados_por_id[x]["label"]
+                            f"{numeracao_csv[x]}. {confirmados_por_id[x]['label']}"
                         ),
                     )
 
