@@ -14,14 +14,25 @@ from ortools.sat.python import cp_model
 # CONFIGURAÇÕES
 # ============================================================
 
-# Tempo usado no modo rápido
+# Tempo usado no modo rápido.
 FAST_TIME_SECONDS = 5
 
-# Tempo de cada metaheurística no modo preciso
+# Tempo de cada metaheurística no modo preciso.
 PRECISE_HEURISTIC_TIME_SECONDS = 8
 
-# Tempo máximo adicional do CP-SAT
+# Tempo máximo adicional do CP-SAT.
 PRECISE_CP_SAT_TIME_SECONDS = 60
+
+# Limite técnico atual do sistema.
+MAX_SUPPORTED_LOCATIONS = 100
+
+# Acima deste número de locais, o modo Preciso continua
+# executando as três metaheurísticas, mas não executa o CP-SAT.
+#
+# O CP-SAT cria aproximadamente N² variáveis booleanas.
+# Em rotas muito grandes isso pode consumir muita memória e CPU,
+# especialmente no Streamlit Community Cloud.
+PRECISE_CP_SAT_MAX_LOCATIONS = 60
 
 # Limita o número de CPUs para não sobrecarregar
 # o servidor do Streamlit.
@@ -90,6 +101,17 @@ def _preparar_matriz(matrix):
 
 
     # ========================================================
+    # MATRIZ VAZIA
+    # ========================================================
+
+    if matrix.shape[0] == 0:
+
+        raise RouteOptimizationError(
+            "A matriz de otimização está vazia."
+        )
+
+
+    # ========================================================
     # VALORES INVÁLIDOS
     # ========================================================
 
@@ -115,6 +137,10 @@ def _preparar_matriz(matrix):
             "A matriz possui valores negativos."
         )
 
+
+    # ========================================================
+    # CONVERSÃO
+    # ========================================================
 
     # OR-Tools trabalha melhor com inteiros.
     return np.rint(
@@ -146,6 +172,93 @@ def _custo_rota(
             route[1:],
         )
     )
+
+
+# ============================================================
+# VALIDA RESULTADO DA ROTA
+# ============================================================
+
+def _validar_rota_resultante(
+    route,
+    n,
+    start_idx,
+    end_idx,
+):
+    """
+    Confirma que a solução contém todos os locais
+    exatamente uma vez, respeitando início e fim.
+
+    Em rota fechada, o ponto inicial aparece novamente
+    no último elemento.
+    """
+
+    rota_fechada = (
+        start_idx == end_idx
+    )
+
+
+    if rota_fechada:
+
+        if len(route) != n + 1:
+
+            raise RouteOptimizationError(
+                "A rota fechada não contém "
+                "a quantidade esperada de pontos."
+            )
+
+        if (
+            route[0] != start_idx
+            or
+            route[-1] != start_idx
+        ):
+
+            raise RouteOptimizationError(
+                "A rota fechada não começa e termina "
+                "no ponto inicial."
+            )
+
+        if len(
+            set(
+                route[:-1]
+            )
+        ) != n:
+
+            raise RouteOptimizationError(
+                "A rota fechada não contém "
+                "todos os locais."
+            )
+
+
+    else:
+
+        if len(route) != n:
+
+            raise RouteOptimizationError(
+                "A rota aberta não contém "
+                "a quantidade esperada de locais."
+            )
+
+        if route[0] != start_idx:
+
+            raise RouteOptimizationError(
+                "A rota não começa no ponto definido."
+            )
+
+        if route[-1] != end_idx:
+
+            raise RouteOptimizationError(
+                "A rota não termina no ponto definido."
+            )
+
+        if len(
+            set(
+                route
+            )
+        ) != n:
+
+            raise RouteOptimizationError(
+                "A rota não contém todos os locais."
+            )
 
 
 # ============================================================
@@ -328,6 +441,22 @@ def _executar_metaheuristica(
     )
 
 
+    # ========================================================
+    # VALIDAÇÃO
+    # ========================================================
+
+    _validar_rota_resultante(
+        route=route,
+        n=n,
+        start_idx=start_idx,
+        end_idx=end_idx,
+    )
+
+
+    # ========================================================
+    # CUSTO
+    # ========================================================
+
     custo = (
         _custo_rota(
             route,
@@ -474,6 +603,43 @@ def _melhor_heuristica_precisa(
 
 
 # ============================================================
+# RESULTADO PRECISO SEM CP-SAT
+# ============================================================
+
+def _resultado_preciso_heuristico(
+    resultado,
+):
+    """
+    Usado em rotas grandes.
+
+    O modo Preciso continua comparando três metaheurísticas,
+    mas não executa CP-SAT para evitar consumo excessivo
+    de CPU e memória.
+    """
+
+    resultado_final = dict(
+        resultado
+    )
+
+
+    resultado_final.update(
+        {
+            "status":
+                "MELHOR HEURÍSTICA",
+
+            "gap_percent":
+                None,
+
+            "lower_bound":
+                None,
+        }
+    )
+
+
+    return resultado_final
+
+
+# ============================================================
 # CP-SAT
 # ============================================================
 
@@ -486,6 +652,9 @@ def _executar_cp_sat(
     """
     Usa o resultado heurístico como limite superior
     e tenta melhorar ou comprovar a solução.
+
+    Essa etapa é utilizada apenas em rotas com tamanho
+    compatível com PRECISE_CP_SAT_MAX_LOCATIONS.
     """
 
     n = len(
@@ -734,9 +903,14 @@ def _executar_cp_sat(
 
         resultado.update(
             {
-                "status": "MELHOR HEURÍSTICA",
-                "gap_percent": None,
-                "lower_bound": None,
+                "status":
+                    "MELHOR HEURÍSTICA",
+
+                "gap_percent":
+                    None,
+
+                "lower_bound":
+                    None,
             }
         )
 
@@ -808,20 +982,6 @@ def _executar_cp_sat(
                 )
 
 
-        # Precisamos visitar todos os pontos exatamente uma vez.
-
-        if (
-            len(route) != n
-            or
-            len(set(route)) != n
-        ):
-
-            raise RouteOptimizationError(
-                "A rota otimizada não contém "
-                "todos os pontos."
-            )
-
-
     # ========================================================
     # RECONSTRÓI ROTA FECHADA
     # ========================================================
@@ -864,28 +1024,16 @@ def _executar_cp_sat(
                 break
 
 
-        # Para N locais:
-        #
-        # [0, 3, 2, 1, 0]
-        #
-        # terá N + 1 elementos.
+    # ========================================================
+    # VALIDA ROTA
+    # ========================================================
 
-        if (
-            len(route) != n + 1
-            or
-            route[-1] != start_idx
-            or
-            len(
-                set(
-                    route[:-1]
-                )
-            ) != n
-        ):
-
-            raise RouteOptimizationError(
-                "O circuito não contém "
-                "todos os pontos."
-            )
+    _validar_rota_resultante(
+        route=route,
+        n=n,
+        start_idx=start_idx,
+        end_idx=end_idx,
+    )
 
 
     # ========================================================
@@ -972,6 +1120,25 @@ def otimizar_rota(
     - durações em segundos.
 
     O algoritmo minimiza a matriz recebida.
+
+    Atualmente suporta até 100 locais.
+
+    Modos:
+
+    Rápido:
+        Guided Local Search.
+
+    Preciso:
+        compara Guided Local Search,
+        Tabu Search e Simulated Annealing.
+
+        Para rotas de até
+        PRECISE_CP_SAT_MAX_LOCATIONS,
+        tenta adicionalmente melhorar/comprovar
+        a solução com CP-SAT.
+
+        Para rotas maiores, retorna diretamente
+        a melhor das três metaheurísticas.
     """
 
     matrix = (
@@ -998,6 +1165,15 @@ def otimizar_rota(
         )
 
 
+    if n > MAX_SUPPORTED_LOCATIONS:
+
+        raise RouteOptimizationError(
+            f"O sistema suporta atualmente até "
+            f"{MAX_SUPPORTED_LOCATIONS} locais "
+            "por rota."
+        )
+
+
     if not (
         0 <= start_idx < n
     ):
@@ -1016,16 +1192,38 @@ def otimizar_rota(
         )
 
 
-    # ========================================================
-    # MODO RÁPIDO
-    # ========================================================
+    modo_normalizado = (
+        str(
+            modo
+            or
+            ""
+        )
+        .strip()
+        .lower()
+    )
 
-    if modo.lower() == "rápido":
+
+    # Aceita também a versão sem acento,
+    # caso algum dado antigo utilize "Rapido".
+    if modo_normalizado in (
+        "rápido",
+        "rapido",
+    ):
 
         return _modo_rapido(
             matrix,
             start_idx,
             end_idx,
+        )
+
+
+    if modo_normalizado not in (
+        "preciso",
+        "precisa",
+    ):
+
+        raise RouteOptimizationError(
+            "Modo de otimização inválido."
         )
 
 
@@ -1041,6 +1239,36 @@ def otimizar_rota(
         )
     )
 
+
+    # ========================================================
+    # ROTAS GRANDES
+    # ========================================================
+
+    # Acima do limite configurado não executamos CP-SAT.
+    #
+    # Em uma rota de 100 locais o modelo completo teria
+    # aproximadamente 9.900 arcos/variáveis possíveis.
+    # No Streamlit isso pode gerar consumo desnecessário
+    # de memória e CPU.
+    #
+    # As três metaheurísticas continuam sendo executadas,
+    # portanto o modo Preciso continua sendo superior
+    # ao modo Rápido nesses casos.
+    if (
+        n
+        > PRECISE_CP_SAT_MAX_LOCATIONS
+    ):
+
+        return (
+            _resultado_preciso_heuristico(
+                melhor
+            )
+        )
+
+
+    # ========================================================
+    # CP-SAT PARA ROTAS MENORES
+    # ========================================================
 
     return _executar_cp_sat(
         matrix,
