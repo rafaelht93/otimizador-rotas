@@ -6,6 +6,8 @@ import logging
 import math
 import re
 import threading
+import secrets
+import uuid
 import time
 import unicodedata
 from datetime import datetime, timedelta
@@ -35,6 +37,22 @@ from route_engine import (
     RouteOptimizationError,
     otimizar_rota,
 )
+
+from rotaki_features import (
+    geoapify_buscar,
+    validar_coordenadas,
+    otimizar_janelas_locais,
+    previsoes_ordem,
+    inverter_locais,
+    nova_chave_compartilhamento,
+    validar_ordem_ids,
+    minutos_hora,
+)
+
+try:
+    from streamlit_sortables import sort_items
+except ImportError:
+    sort_items = None
 
 from app_logic import (
     dividir_rota_google_maps as dividir_rota_google_maps_logic,
@@ -104,6 +122,58 @@ def mostrar_erro_usuario(
     else:
         st.error(mensagem_padrao)
 
+
+# ============================================================
+# VISUALIZAÇÃO PÚBLICA DE ROTA COMPARTILHADA (somente leitura)
+# ============================================================
+
+def exibir_rota_compartilhada_publica():
+    token = str(st.query_params.get("rota_compartilhada") or "")
+    if not token or len(token) > 128:
+        return False
+    st.title("🗺️ Rota compartilhada · Rotaki")
+    try:
+        endereco = str(st.secrets["SUPABASE_URL"]).rstrip("/")
+        chave = str(st.secrets["SUPABASE_SECRET_KEY"])
+        digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        resposta = requests.get(
+            f"{endereco}/rest/v1/compartilhamentos_rotas",
+            headers={"apikey": chave},
+            params={"select": "dados_publicos,expira_em,revogado",
+                    "token_hash": f"eq.{digest}", "revogado": "eq.false",
+                    "expira_em": f"gt.{datetime.now(ZoneInfo('UTC')).isoformat()}",
+                    "limit": "1"}, timeout=12,
+        )
+        resposta.raise_for_status()
+        registros = resposta.json()
+        if not registros:
+            st.warning("Este compartilhamento expirou ou foi revogado.")
+            return True
+        dados = registros[0].get("dados_publicos") or {}
+        locais = dados.get("locais") or []
+        st.subheader(dados.get("nome") or "Rota")
+        st.caption("Consulta pública apenas da sequência compartilhada. Não permite editar nem executar entregas.")
+        for i, local in enumerate(locais, start=1):
+            st.write(f"**{i}.** {local.get('nome') or local.get('endereco') or 'Local'}")
+            destino = f"{float(local['latitude']):.7f},{float(local['longitude']):.7f}"
+            st.link_button(f"🧭 Navegar até o ponto {i}",
+                'https://www.google.com/maps/dir/?'+urlencode({
+                    'api':'1','destination':destino,'travelmode':'driving','dir_action':'navigate',
+                }), use_container_width=True)
+        if locais:
+            mapa = folium.Map(location=[float(locais[0]['latitude']), float(locais[0]['longitude'])], zoom_start=12)
+            for i, loc in enumerate(locais, start=1):
+                folium.Marker([float(loc['latitude']), float(loc['longitude'])],
+                              tooltip=f"{i}. {str(loc.get('nome') or '')[:100]}").add_to(mapa)
+            st_folium(mapa, height=450, use_container_width=True, returned_objects=[])
+    except Exception:
+        logger.exception("Falha ao abrir rota pública")
+        st.warning("Não foi possível abrir o compartilhamento. Verifique se ele continua válido.")
+    return True
+
+if st.query_params.get("rota_compartilhada"):
+    exibir_rota_compartilhada_publica()
+    st.stop()
 
 # ============================================================
 # LOGIN
@@ -263,6 +333,10 @@ init_state("import_edit_version", 0)
 init_state("pagina_scroll_anterior", None)
 init_state("scroll_execucao_pendente", 0)
 init_state("scroll_execucao_aplicado", 0)
+init_state("motorista_modo", False)
+init_state("nova_parada_execucao", None)
+init_state("compartilhamento_link", None)
+init_state("ordem_manualmente_alterada", False)
 
 
 # ============================================================
@@ -1075,6 +1149,234 @@ def mostrar_mapa_trecho_execucao(origem, destino, chave):
         st.warning(f"Não foi possível carregar o mapa deste trecho: {erro}")
 
 
+
+def criar_link_rota_compartilhavel(rota_id, nome_rota, dados, dias=7):
+    """Só proprietário logado; token randômico não é armazenado em claro."""
+    if not rota_id:
+        raise ValueError("Salve a rota antes de gerar um link de compartilhamento.")
+    rota_autorizada = supabase_user_request(
+        "rotas", "GET", params={"select":"id", "id":f"eq.{rota_id}", "limit":"1"})
+    if not rota_autorizada:
+        raise PermissionError("A rota não pertence ao usuário atual.")
+    locais = dados.get("locais_ordenados") or []
+    if not locais or len(locais) > 200:
+        raise ValueError("A rota não possui paradas compartilháveis.")
+    publicos = []
+    for local in locais:
+        lat, lon = validar_coordenadas(local["latitude"], local["longitude"])
+        publicos.append({"nome": str(local.get("nome") or local.get("label") or "Local")[:200],
+                        "latitude":lat,"longitude":lon})
+    token, digest = nova_chave_compartilhamento()
+    expira = (datetime.now(ZoneInfo("UTC")) + timedelta(days=dias)).isoformat()
+    supabase_user_request("compartilhamentos_rotas", "POST", json_body={
+        "rota_id":rota_id, "token_hash":digest, "dados_publicos":{
+            "nome":str(nome_rota or "Rota")[:200],"locais":publicos},
+        "expira_em":expira,
+    })
+    return f"{APP_URL}/?rota_compartilhada={token}"
+
+
+def interface_compartilhamento_rota(dados):
+    rota_id = st.session_state.rota_atual_id
+    if not rota_id:
+        return
+    if st.session_state.get('compartilhamento_rota_id') != rota_id:
+        st.session_state.compartilhamento_link = None
+        st.session_state.compartilhamento_rota_id = rota_id
+    with st.expander("🔗 Compartilhar rota (link válido por 7 dias)"):
+        st.warning("Qualquer pessoa com o link poderá ver a sequência e a posição das paradas. Não compartilhe rotas com endereços sensíveis.")
+        if st.button("Gerar link privado por token", key="gerar_link_compartilhar"):
+            try:
+                st.session_state.compartilhamento_link = criar_link_rota_compartilhavel(
+                    rota_id, st.session_state.rota_atual_nome, dados)
+            except Exception as erro:
+                mostrar_erro_usuario("Falha ao criar compartilhamento", erro,
+                    "Verifique se a migração SQL dos compartilhamentos foi executada.")
+        if st.session_state.compartilhamento_link:
+            st.code(st.session_state.compartilhamento_link, language=None)
+            st.caption("Guarde o link. O token não é recuperável após sair da sessão.")
+        try:
+            links = supabase_user_request('compartilhamentos_rotas','GET',params={
+                'select':'id,expira_em,revogado,criado_em', 'rota_id':f'eq.{rota_id}',
+                'order':'criado_em.desc','limit':'20'})
+            for item in links:
+                if item.get('revogado'):continue
+                c1,c2=st.columns([4,1])
+                c1.caption('Expira em: '+formatar_data(item['expira_em']))
+                if c2.button('Revogar',key=f"revogar_{item['id']}"):
+                    supabase_user_request('compartilhamentos_rotas','PATCH',
+                        params={'id':f"eq.{item['id']}"}, json_body={'revogado':True})
+                    st.session_state.compartilhamento_link=None
+                    st.rerun()
+        except Exception:
+            st.caption('Para ativar os links compartilhados, execute a migração SQL.')
+
+
+def salvar_foto_comprovante(execucao_id, parada_id, arquivo):
+    """Upload autenticado no backend em bucket privado e metadata vinculada ao usuário."""
+    paradas_autorizadas = listar_paradas_execucao(execucao_id)
+    parada = next((x for x in paradas_autorizadas if str(x['id']) == str(parada_id)), None)
+    if not parada or parada.get('status') not in ('entregue','nao_entregue'):
+        raise PermissionError('Conclua a parada antes de anexar um comprovante.')
+    bytes_foto = arquivo.getvalue()
+    if len(bytes_foto) > 5 * 1024 * 1024:
+        raise ValueError('A imagem deve ter no máximo 5 MB.')
+    if bytes_foto.startswith(b'\xff\xd8\xff'):
+        mime, extensao = 'image/jpeg','jpg'
+    elif bytes_foto.startswith(b'\x89PNG\r\n\x1a\n'):
+        mime, extensao = 'image/png','png'
+    else:
+        raise ValueError('O arquivo deve ser uma imagem JPEG ou PNG válida.')
+    identificador = uuid.uuid4().hex
+    caminho = f'{usuario_id}/{execucao_id}/{parada_id}/{identificador}.{extensao}'
+    resposta = requests.post(
+        f'{SUPABASE_URL}/storage/v1/object/rotaki-comprovantes/{caminho}',
+        headers={'apikey':SUPABASE_SECRET_KEY,'Content-Type':mime,'x-upsert':'false'},
+        data=bytes_foto,timeout=30)
+    if not resposta.ok:
+        raise OperacaoUsuarioError('Não foi possível gravar a imagem no armazenamento privado.')
+    try:
+        supabase_user_request('comprovantes_entrega','POST',json_body={
+            'execucao_id':execucao_id,'parada_id':parada_id,
+            'storage_path':caminho,'tipo_mime':mime})
+    except Exception:
+        try:
+            requests.delete(f'{SUPABASE_URL}/storage/v1/object/rotaki-comprovantes/{caminho}',
+                            headers={'apikey':SUPABASE_SECRET_KEY},timeout=10)
+        except requests.RequestException: pass
+        raise
+
+
+def renderizar_comprovantes(execucao_id, parada):
+    if parada.get('status') not in ('entregue','nao_entregue'):
+        return
+    with st.container(border=True):
+        st.markdown('**📷 Comprovante fotográfico desta parada**')
+        try:
+            encontrados = supabase_user_request('comprovantes_entrega','GET',params={
+                'select':'id,storage_path,criado_em','execucao_id':f'eq.{execucao_id}',
+                'parada_id':f"eq.{parada['id']}",'order':'criado_em.desc','limit':'10'})
+            for item in encontrados:
+                caminho = item.get('storage_path')
+                if not caminho or not caminho.startswith(f'{usuario_id}/{execucao_id}/{parada["id"]}/'):
+                    continue
+                signed = requests.post(f'{SUPABASE_URL}/storage/v1/object/sign/rotaki-comprovantes/{caminho}',
+                    headers={'apikey':SUPABASE_SECRET_KEY,'Content-Type':'application/json'},
+                    json={'expiresIn':120},timeout=10)
+                if signed.ok:
+                    url = signed.json().get('signedURL') or signed.json().get('signedUrl')
+                    if url:
+                        url = url if str(url).startswith('https://') else SUPABASE_URL+'/storage/v1'+('/'+url.lstrip('/'))
+                        st.image(url,caption='Comprovante '+formatar_data(item['criado_em']),width=260)
+        except Exception:
+            st.caption('Execute a migração SQL para habilitar armazenamento de comprovantes.')
+        if str(parada.get('status')) in ('entregue','nao_entregue'):
+            fonte = st.radio('Origem da foto',['Escolher imagem','Câmera'], horizontal=True,
+                             key=f"fonte_pod_{parada['id']}")
+            imagem = (st.camera_input('Fotografar comprovante',key=f"camera_pod_{parada['id']}")
+                      if fonte == 'Câmera' else st.file_uploader('Anexar imagem',type=['png','jpg','jpeg'],
+                        key=f"foto_pod_{parada['id']}"))
+            if imagem is not None and st.button('💾 Salvar comprovante',key=f"salvar_pod_{parada['id']}"):
+                try:
+                    salvar_foto_comprovante(execucao_id,parada['id'],imagem)
+                    st.success('Comprovante registrado em armazenamento privado.')
+                    st.rerun()
+                except Exception as erro:
+                    mostrar_erro_usuario('Falha ao salvar comprovante',erro)
+
+
+def renderizar_reotimizacao_execucao(execucao, paradas, dados_base):
+    pendentes = [p for p in paradas if p.get('status') == 'pendente']
+    if not pendentes:
+        return
+    with st.expander('🔄 Reotimizar paradas restantes e incluir nova parada'):
+        st.caption('Paradas já concluídas serão preservadas. Uma nova otimização consome um cálculo do plano.')
+        concluidas = [p for p in paradas if p.get('status') in ('entregue','nao_entregue')]
+        origem_padrao = concluidas[-1] if concluidas else (dados_base.get('locais_ordenados') or [{}])[0]
+        st.caption('Local de partida: use a última parada concluída ou informe sua posição atual em coordenadas.')
+        origem_manual = st.text_input('Posição atual (latitude, longitude, opcional)',
+                                      key=f"local_atual_exec_{execucao['id']}")
+        if origem_manual.strip():
+            origem = interpretar_texto_coordenadas(origem_manual)
+            if not origem:
+                st.error('Coordenadas inválidas. Utilize -27.123456, -48.123456.')
+                return
+        else:
+            origem=origem_padrao
+        nova = campo_local(f"nova_exec_{execucao['id']}", 'Adicionar outra entrega (opcional)',
+                          'Endereço ou latitude, longitude...', focus=origem)
+        if st.button('🚗 Calcular nova ordem das pendentes',key=f"reopt_exec_{execucao['id']}",
+                     type='primary'):
+            try:
+                existentes=[]
+                for p in pendentes:
+                    locais_existentes = dict(p)
+                    locais_existentes['label']=p.get('endereco') or p.get('nome') or 'Parada'
+                    existentes.append(locais_existentes)
+                if nova:
+                    la,lo = validar_coordenadas(nova['latitude'],nova['longitude'])
+                    locais_existentes = {'id':str(uuid.uuid4()),
+                        'nome':str(nova.get('label') or 'Nova parada'),
+                        'label':str(nova.get('label') or 'Nova parada'),
+                        'endereco':str(nova.get('label') or 'Nova parada'),
+                        'latitude':la,'longitude':lo,'tipo':'Parada',
+                        '_novo':True}
+                    existentes.append(locais_existentes)
+                origem_local = dict(origem)
+                origem_local['label'] = str(origem.get('label') or origem.get('nome') or 'Partida atual')
+                locais_calculo = [converter_local(origem_local,'Início')]
+                for i,p in enumerate(existentes,start=1):
+                    locais_calculo.append(converter_local(p,f'Parada {i}'))
+                # Se houver destino final ainda pendente, ele permanece fixo.
+                fim_original = (dados_base.get('locais_ordenados') or [])[-1]
+                fechado = bool(dados_base.get('voltar_inicio'))
+                if fechado and fim_original:
+                    local_fim = dict(fim_original)
+                    local_fim['label'] = str(local_fim.get('label') or local_fim.get('nome') or 'Base')
+                    coord_fim = (round(float(local_fim['latitude']),6),round(float(local_fim['longitude']),6))
+                    coord_orig = (round(float(origem_local['latitude']),6),round(float(origem_local['longitude']),6))
+                    if coord_fim != coord_orig:
+                        locais_calculo.append(converter_local(local_fim,'Fim'))
+                elif not fechado:
+                    # Ponto final original permanece como último, caso ainda esteja pendente.
+                    final = dados_base.get('locais_base') or []
+                    if final:
+                        end_base = final[-1]
+                        for j,p in enumerate(existentes):
+                            if (round(float(p['latitude']),6),round(float(p['longitude']),6)) == (
+                               round(float(end_base['latitude']),6),round(float(end_base['longitude']),6)):
+                                locais_calculo.append(locais_calculo.pop(j+1))
+                                break
+                result = calcular_rota_a_partir_de_locais(locais_calculo, False,
+                          dados_base.get('objetivo','Menor distância'),
+                          dados_base.get('modo','Rápido'))
+                indice = {(round(float(p['latitude']),6),round(float(p['longitude']),6)):p for p in existentes}
+                ordenadas=[]
+                for x in result['locais_ordenados'][1:]:
+                    chave=(round(float(x['latitude']),6),round(float(x['longitude']),6))
+                    p=indice.get(chave)
+                    if p and p not in ordenadas:
+                        ordenadas.append(p)
+                ids = [str(p['id']) for p in existentes]
+                validar_ordem_ids(ids,[str(p['id']) for p in ordenadas])
+                payload=[{'id':str(p['id']),'nome':str(p.get('nome') or p.get('label') or 'Parada'),
+                         'endereco':str(p.get('endereco') or p.get('label') or ''),
+                         'latitude':float(p['latitude']),'longitude':float(p['longitude']),
+                         'tipo':str(p.get('tipo') or 'Parada')} for p in ordenadas]
+                supabase_rpc('rotaki_reotimizar_execucao_tx', {
+                    'p_user_id':usuario_id,'p_execucao_id':execucao['id'],
+                    'p_paradas':payload,
+                    'p_snapshot':{'origem_atual':origem_local,'resultado':result,
+                       'primeira_parada_id':str(ordenadas[0]['id']),
+                       'reotimizada_em':agora_iso()},
+                })
+                st.success('Paradas pendentes reordenadas sem alterar as concluídas.')
+                st.rerun()
+            except Exception as erro:
+                mostrar_erro_usuario('Falha ao reotimizar execução',erro)
+
+
+
 def renderizar_execucao_entrega_detalhe(execucao_id):
     execucao = obter_execucao_entrega(
         execucao_id
@@ -1102,6 +1404,12 @@ def renderizar_execucao_entrega_detalhe(execucao_id):
         )
         for indice, parada in enumerate(paradas)
     }
+    snapshot_novo = dados_rota_execucao.get('ultima_reotimizacao') or {}
+    origem_nova = snapshot_novo.get('origem_atual') or {}
+    primeira_pendente = next((p for p in paradas if p.get('status') == 'pendente'), None)
+    if (primeira_pendente and origem_nova.get('latitude') is not None
+            and str(primeira_pendente['id']) == str(snapshot_novo.get('primeira_parada_id'))):
+        origem_por_parada[primeira_pendente['id']] = origem_nova
 
     total = len(paradas)
     concluidas = sum(
@@ -1126,6 +1434,17 @@ def renderizar_execucao_entrega_detalhe(execucao_id):
     st.subheader(
         "🚚 Execução da rota"
     )
+    st.session_state.motorista_modo = st.toggle(
+        "📱 Modo motorista (botões ampliados)",
+        value=bool(st.session_state.motorista_modo),key=f"modo_motorista_{execucao_id}")
+    if st.session_state.motorista_modo:
+        st.markdown('''<style>
+        div[data-testid="stButton"] button, div[data-testid="stLinkButton"] a {
+            min-height: 54px; font-size: 1.04rem; font-weight: 600;
+        }
+        div[data-testid="stTextArea"] textarea {min-height: 100px;}
+        </style>''', unsafe_allow_html=True)
+        st.caption('Tela de navegação simplificada, para uso em celular estacionado.')
 
     st.caption(
         execucao.get("nome_rota")
@@ -1202,6 +1521,9 @@ def renderizar_execucao_entrega_detalhe(execucao_id):
                 st.write(
                     f"📍 {proxima['endereco']}"
                 )
+            agenda = dados_rota_execucao.get('previsoes_chegada') or []
+            if not dados_rota_execucao.get('ultima_reotimizacao') and len(agenda) > int(proxima.get('ordem') or 0):
+                st.caption(f"🕒 Chegada planejada: {agenda[int(proxima['ordem'])].get('chegada','—')} (estimativa)")
 
             st.link_button(
                 "🧭 Navegar até esta parada",
@@ -1397,7 +1719,11 @@ def renderizar_execucao_entrega_detalhe(execucao_id):
                         )
                         st.rerun()
 
+            # Foto opcional vinculada à parada já concluída.
+            renderizar_comprovantes(execucao_id, parada)
+
     if em_andamento:
+        renderizar_reotimizacao_execucao(execucao, paradas, dados_rota_execucao)
         st.divider()
 
         if concluidas == total and total > 0:
@@ -3995,6 +4321,17 @@ def buscar_sugestoes_cache(texto, focus_lat, focus_lon, cidade_referencia, _api_
     if coordenada:
         return [coordenada]
 
+    try:
+        principal = str(st.secrets.get('GEOCODER_PRINCIPAL','pelias')).lower()
+        altkey = str(st.secrets.get('GEOAPIFY_KEY','')).strip()
+        if altkey and principal == 'geoapify':
+            alternativos = geoapify_buscar(texto, altkey,
+                autocomplete=not bool(re.search(r'(?<!\w)\d{1,6}(?!\w)', texto)),
+                limite=12, lat=focus_lat, lon=focus_lon)
+            if alternativos:
+                return ordenar_resultados_enderecos(alternativos,texto,cidade_referencia)[:12]
+    except Exception as erro_geocoder:
+        logger.warning('Geocodificador principal Geoapify falhou: %s', erro_geocoder)
     cidade = str(cidade_referencia or "").strip()
     consulta = texto
     if cidade and normalizar_texto(cidade.split(",")[0]) not in normalizar_texto(texto):
@@ -4022,10 +4359,14 @@ def buscar_sugestoes_cache(texto, focus_lat, focus_lon, cidade_referencia, _api_
         # Fallback único apenas em indisponibilidade, sem repetir a mesma API.
         logger.warning("Busca %s falhou; tentando endpoint alternativo", endpoint)
         endpoint = "autocomplete" if endereco_com_numero else "search"
-        if endereco_com_numero:
-            sugestoes = autocomplete_enderecos(texto=texto, **comum)
-        else:
-            sugestoes = buscar_enderecos(texto=consulta, **comum)
+        try:
+            if endereco_com_numero:
+                sugestoes = autocomplete_enderecos(texto=texto, **comum)
+            else:
+                sugestoes = buscar_enderecos(texto=consulta, **comum)
+        except ORSError:
+            # A busca alternativa Geoapify ainda poderá responder.
+            sugestoes = []
         fallback_ja_executado = True
     else:
         fallback_ja_executado = False
@@ -4041,6 +4382,17 @@ def buscar_sugestoes_cache(texto, focus_lat, focus_lon, cidade_referencia, _api_
         except ORSError:
             logger.info("Fallback de geocodificação indisponível")
 
+    try:
+        chave_alt = str(st.secrets.get("GEOAPIFY_KEY", "")).strip()
+        preferencia = str(st.secrets.get("GEOCODER_PRINCIPAL", "pelias")).lower()
+        if chave_alt and (not sugestoes or preferencia == "geoapify"):
+            alternativos = geoapify_buscar(texto, chave_alt,
+                autocomplete=not endereco_com_numero, limite=12,
+                lat=focus_lat, lon=focus_lon)
+            if alternativos:
+                sugestoes = (alternativos + sugestoes) if preferencia == "geoapify" else alternativos
+    except Exception as falha_alt:
+        logger.warning("Geoapify indisponível; usando resultado Pelias: %s", falha_alt)
     ordenados = ordenar_resultados_enderecos(sugestoes, texto, cidade_referencia)[:15]
     logger.debug(
         "Pelias endpoint=%s chars=%d resultados=%d duracao_ms=%.0f",
@@ -4062,7 +4414,18 @@ def buscar_endereco_importado_cache_v2(
     consulta = texto
     if cidade and normalizar_texto(cidade.split(",")[0]) not in normalizar_texto(texto):
         consulta = f"{texto}, {cidade}"
-    candidatos = buscar_enderecos(texto=consulta, api_key=_api_key, limite=12)
+    try:
+        if st.secrets.get('GEOAPIFY_KEY') and str(st.secrets.get('GEOCODER_PRINCIPAL','pelias')).lower() == 'geoapify':
+            candidatos = geoapify_buscar(consulta, str(st.secrets['GEOAPIFY_KEY']),autocomplete=False,limite=12)
+        else:
+            candidatos = buscar_enderecos(texto=consulta, api_key=_api_key, limite=12)
+    except Exception:
+        candidatos = []
+    if not candidatos and st.secrets.get('GEOAPIFY_KEY'):
+        try:
+            candidatos = geoapify_buscar(consulta, str(st.secrets['GEOAPIFY_KEY']),autocomplete=False,limite=12)
+        except Exception:
+            pass
     if consulta != texto and len(candidatos) < 3:
         candidatos += buscar_enderecos(texto=texto, api_key=_api_key, limite=8)
     return ordenar_resultados_enderecos(candidatos, texto, cidade)[:12]
@@ -4679,6 +5042,7 @@ def calcular_rota_a_partir_de_locais(
     voltar_inicio,
     objetivo,
     modo,
+    preservar_ordem=False,
 ):
     if not ors_configurado:
         raise ORSError("OpenRouteService não configurado.")
@@ -4725,7 +5089,25 @@ def calcular_rota_a_partir_de_locais(
             "modo": modo,
         }
 
-        if modo == "Preciso":
+        tem_janelas = any(local.get("janela_inicio") or local.get("janela_fim") for local in locais)
+        if preservar_ordem:
+            ordem_selecionada = list(range(len(locais)))
+            if voltar_inicio:
+                ordem_selecionada.append(0)
+            resultado_solver = {
+                "route": ordem_selecionada,
+                "status": "ORDEM_MANUAL",
+                "metodo": "Sequência informada pelo usuário",
+                "gap_percent": None,
+            }
+        elif tem_janelas:
+            resultado_solver = otimizar_janelas_locais(
+                locais, matrix_otimizacao, matrix_data["duracoes"],
+                voltar_inicio=voltar_inicio,
+                partida=str(locais[0].get("horario_partida") or "08:00"),
+                limite_s=20,
+            )
+        elif modo == "Preciso":
             semaforo = obter_semaforo_otimizacoes_pesadas()
             if not semaforo.acquire(blocking=False):
                 raise LimiteUsoError(
@@ -4758,8 +5140,25 @@ def calcular_rota_a_partir_de_locais(
         if gap is not None:
             gap = float(gap)
 
+        previsoes = previsoes_ordem(
+            locais, resultado_solver["route"], matrix_data["duracoes"],
+            partida=str(locais[0].get("horario_partida") or "08:00"),
+            chegadas=resultado_solver.get("chegadas_min"),
+        )
+        if preservar_ordem:
+            from rotaki_features import janela_local
+            for p, registro in zip(resultado_solver["route"], previsoes):
+                _, limite, _ = janela_local(locais[p])
+                if registro["minuto_absoluto"] > limite:
+                    raise ValueError(
+                        "A ordem manual ultrapassa a janela de atendimento de "
+                        + str(locais[p].get("nome") or "um ponto")
+                    )
         return {
-            "versao": 14,
+            "versao": 15,
+            "preservar_ordem": bool(preservar_ordem),
+            "previsoes_chegada": preparar_json(previsoes),
+            "horario_partida": str(locais[0].get("horario_partida") or "08:00"),
             "voltar_inicio": bool(voltar_inicio),
             "objetivo": objetivo,
             "modo": modo,
@@ -5264,6 +5663,8 @@ def gerar_excel_rota(dataframe, dados):
         "ordem", "tipo", "local", "endereco",
         "observacao", "latitude", "longitude",
     ]
+    if 'chegada_prevista' in dataframe.columns:
+        colunas.append('chegada_prevista')
     rotulos = {
         "ordem": "Nº",
         "tipo": "Tipo",
@@ -5272,6 +5673,7 @@ def gerar_excel_rota(dataframe, dados):
         "observacao": "Observação",
         "latitude": "Latitude",
         "longitude": "Longitude",
+        "chegada_prevista": "Chegada prevista",
     }
     planilha_rota = dataframe.reindex(columns=colunas).rename(columns=rotulos)
 
@@ -5282,8 +5684,9 @@ def gerar_excel_rota(dataframe, dados):
             return "'" + valor
         return valor
 
-    for coluna in ("Tipo", "Local", "Endereço", "Observação"):
-        planilha_rota[coluna] = planilha_rota[coluna].map(texto_seguro)
+    for coluna in ("Tipo", "Local", "Endereço", "Observação", "Chegada prevista"):
+        if coluna in planilha_rota.columns:
+            planilha_rota[coluna] = planilha_rota[coluna].map(texto_seguro)
 
     distancia_km, tempo = dados_metricas(dados)
     objetivo = dados.get("objetivo") or "—"
@@ -5313,7 +5716,8 @@ def gerar_excel_rota(dataframe, dados):
         aba_rota.sheet_view.tabSelected = True
         writer.sheets["Resumo"].sheet_view.tabSelected = False
 
-        aba_rota.merge_cells("A1:G1")
+        ultima_coluna_excel = get_column_letter(len(planilha_rota.columns))
+        aba_rota.merge_cells(f"A1:{ultima_coluna_excel}1")
         titulo = aba_rota["A1"]
         titulo.value = "ROTA OTIMIZADA — ORDEM DE VISITA"
         titulo.font = Font(name="Aptos", size=16, bold=True, color="FFFFFF")
@@ -5344,12 +5748,12 @@ def gerar_excel_rota(dataframe, dados):
             cel.alignment = Alignment(vertical="center")
         aba_rota.row_dimensions[linha_cabecalho].height = 23
 
-        larguras = (9, 14, 35, 55, 37, 18, 18)
+        larguras = (9, 14, 35, 55, 37, 18, 18, 20)
         for i, largura in enumerate(larguras, start=1):
             aba_rota.column_dimensions[get_column_letter(i)].width = largura
 
         for linha in range(linha_cabecalho + 1, ultima_linha + 1):
-            for coluna in range(1, 8):
+            for coluna in range(1, len(planilha_rota.columns) + 1):
                 cel = aba_rota.cell(row=linha, column=coluna)
                 cel.alignment = Alignment(vertical="top", wrap_text=coluna in (3, 4, 5))
                 if linha % 2 == 0:
@@ -5358,7 +5762,7 @@ def gerar_excel_rota(dataframe, dados):
                 aba_rota.cell(row=linha, column=coluna).number_format = "0.0000000"
             aba_rota.row_dimensions[linha].height = 28
 
-        aba_rota.auto_filter.ref = f"A{linha_cabecalho}:G{ultima_linha}"
+        aba_rota.auto_filter.ref = f"A{linha_cabecalho}:{ultima_coluna_excel}{ultima_linha}"
         aba_rota.freeze_panes = "A7"
         aba_rota.print_title_rows = "1:6"
         aba_rota.sheet_properties.pageSetUpPr.fitToPage = True
@@ -5469,6 +5873,7 @@ def renderizar_resultado_rota(
                                 "modo",
                                 "Rápido",
                             ),
+                            preservar_ordem=bool(dados.get("preservar_ordem", False)),
                         )
                     )
 
@@ -5618,6 +6023,15 @@ def renderizar_resultado_rota(
             "_(retorno)_"
         )
 
+    if dados.get("previsoes_chegada"):
+        with st.expander("🕒 Horários estimados de chegada", expanded=False):
+            st.caption("Estimativas calculadas com a matriz de trânsito do ORS; não são horários GPS em tempo real.")
+            st.dataframe(pd.DataFrame([
+                {"Parada": item["ordem"], "Local": item["nome"],
+                 "Previsão": item["chegada"] + (f" (+{item['dia_adicional']} dia)" if item.get('dia_adicional') else "")}
+                for item in dados["previsoes_chegada"]
+            ]), hide_index=True, use_container_width=True)
+
     st.subheader(
         "🚚 Executar rota"
     )
@@ -5758,6 +6172,9 @@ def renderizar_resultado_rota(
             "Esta rota já está salva."
         )
 
+    if st.session_state.rota_atual_id:
+        interface_compartilhamento_rota(dados)
+
     try:
 
         mapa = criar_mapa(
@@ -5790,6 +6207,11 @@ def renderizar_resultado_rota(
                 voltar_inicio,
             )
         )
+        previsoes_exportacao = dados.get("previsoes_chegada") or []
+        if len(previsoes_exportacao) == len(dataframe):
+            dataframe["chegada_prevista"] = [
+                item["chegada"] for item in previsoes_exportacao
+            ]
 
         csv_bytes = (
             dataframe
@@ -7194,6 +7616,7 @@ def renderizar_minhas_rotas():
                                     "modo",
                                     "Rápido",
                                 ),
+                                preservar_ordem=bool(dados.get("preservar_ordem", False)),
                             )
                         )
 
@@ -7237,6 +7660,14 @@ def renderizar_minhas_rotas():
             with st.expander(
                 "⚙️ Gerenciar"
             ):
+
+                if st.button("📑 Duplicar esta rota", key=f"duplicar_{rota['id']}"):
+                    try:
+                        salvar_rota_banco(f"{rota['nome']} (cópia)", dados)
+                        st.success("Cópia criada. A rota original foi preservada.")
+                        st.rerun()
+                    except Exception as erro:
+                        mostrar_erro_usuario("Falha ao duplicar rota", erro)
 
                 novo_nome = (
                     st.text_input(
@@ -8825,6 +9256,7 @@ def carregar_rota_base_no_editor(rota):
     st.session_state.rota_base_edicao_pontos = pontos
     st.session_state.rota_base_edicao_voltar = bool(dados.get("voltar_inicio", False))
     st.session_state.rota_base_edicao_versao += 1
+    st.session_state.ordem_manualmente_alterada = False
 
 
 def remover_ponto_editor_rota_salva(uid):
@@ -8872,6 +9304,125 @@ def campo_editavel_rota_salva(ponto, numero, tipo, foco):
             remover_ponto_editor_rota_salva(ponto["uid"])
             st.rerun()
     return encontrado if isinstance(encontrado, dict) else None
+
+
+def renderizar_ferramentas_editor_rota(lista, retorno):
+    """Edição avançada de rota salva: drag/drop, inversão, tabela e mapa."""
+    if not lista or len(lista) < 2:
+        return
+    versao = st.session_state.rota_base_edicao_versao
+    with st.expander("🛠️ Reorganizar e corrigir os pontos", expanded=False):
+        if not retorno and st.button("🔁 Inverter origem e destino", key=f"inverter_base_{versao}"):
+            st.session_state.rota_base_edicao_pontos = list(reversed(lista))
+            st.session_state.rota_base_edicao_versao += 1
+            st.session_state.ordem_manualmente_alterada = True
+            st.session_state[f"preservar_ordem_{st.session_state.form_version}_Usar rota salva"] = True
+            st.rerun()
+        elif retorno:
+            st.caption("Desative 'Retornar ao ponto inicial' antes de inverter a rota.")
+
+        indices_intermediarios = list(range(1, len(lista) if retorno else len(lista)-1))
+        if len(indices_intermediarios) > 1:
+            st.markdown("**Reorganizar paradas manualmente**")
+            nomes = []
+            por_nome = {}
+            for idx in indices_intermediarios:
+                p = lista[idx]
+                nome = f"{p['uid']} · {str((p.get('local') or {}).get('label') or 'Nova parada')[:70]}"
+                nomes.append(nome)
+                por_nome[nome] = p
+            if sort_items:
+                ordenados = sort_items(nomes, key=f"sort_rotaki_{st.session_state.rota_base_edicao_id}_{versao}")
+                if ordenados and ordenados != nomes:
+                    if st.button("✅ Aplicar ordem arrastada", key=f"aplicar_sort_{versao}"):
+                        itens = [por_nome[n] for n in ordenados]
+                        st.session_state.rota_base_edicao_pontos = [lista[0]] + itens + ([] if retorno else [lista[-1]])
+                        st.session_state.rota_base_edicao_versao += 1
+                        st.session_state.ordem_manualmente_alterada = True
+                        st.session_state[f"preservar_ordem_{st.session_state.form_version}_Usar rota salva"] = True
+                        st.rerun()
+            else:
+                st.caption("Para arrastar e soltar, adicione `streamlit-sortables` ao requirements.txt.")
+                for idx in indices_intermediarios:
+                    p = lista[idx]
+                    a,b,c = st.columns([6,1,1])
+                    a.write(str((p.get('local') or {}).get('label') or 'Nova parada'))
+                    if b.button("⬆",key=f"up_{versao}_{p['uid']}",disabled=idx == indices_intermediarios[0]):
+                        lista[idx-1], lista[idx] = lista[idx],lista[idx-1]
+                        st.session_state.ordem_manualmente_alterada = True
+                        st.session_state[f"preservar_ordem_{st.session_state.form_version}_Usar rota salva"] = True
+                        st.session_state.rota_base_edicao_versao += 1
+                        st.rerun()
+                    if c.button("⬇",key=f"down_{versao}_{p['uid']}",disabled=idx == indices_intermediarios[-1]):
+                        lista[idx+1], lista[idx] = lista[idx],lista[idx+1]
+                        st.session_state.ordem_manualmente_alterada = True
+                        st.session_state[f"preservar_ordem_{st.session_state.form_version}_Usar rota salva"] = True
+                        st.session_state.rota_base_edicao_versao += 1
+                        st.rerun()
+
+        st.markdown("**Edição em tabela**")
+        st.caption("Edite nomes e coordenadas em lote. Alterar apenas o texto NÃO altera a posição geográfica; para isso, informe novas coordenadas ou corrija no mapa.")
+        tabela = pd.DataFrame([{
+            'ID':str(p['uid']),
+            'Endereço ou nome':str((p.get('local') or {}).get('label') or ''),
+            'Latitude':(p.get('local') or {}).get('latitude'),
+            'Longitude':(p.get('local') or {}).get('longitude'),
+        } for p in lista])
+        edited = st.data_editor(tabela, hide_index=True, disabled=['ID'],
+                                use_container_width=True, key=f"tabela_lote_{versao}")
+        if st.button("💾 Aplicar edições em lote",key=f"aplicar_lote_{versao}"):
+            novos = []
+            try:
+                for i, linha in edited.reset_index(drop=True).iterrows():
+                    nome = str(linha['Endereço ou nome'] or '').strip()
+                    if not nome:
+                        raise ValueError(f"Ponto {i+1}: informe um nome ou endereço.")
+                    lat, lon = validar_coordenadas(linha['Latitude'], linha['Longitude'])
+                    anterior = lista[i]
+                    local = dict(anterior.get('local') or {})
+                    local.update({'label': nome,'nome': nome,'latitude': lat, 'longitude': lon})
+                    novos.append({'uid': anterior['uid'], 'local': local})
+                st.session_state.rota_base_edicao_pontos = novos
+                st.session_state.rota_base_edicao_versao += 1
+                st.rerun()
+            except (ValueError, TypeError) as erro:
+                st.error(str(erro))
+
+        st.markdown("**Corrigir coordenadas clicando no mapa**")
+        opcoes = list(range(len(lista)))
+        indice = st.selectbox("Escolha o ponto que deseja corrigir",opcoes,
+                             format_func=lambda i: f"{i+1}. {(lista[i].get('local') or {}).get('label') or 'Novo ponto'}",
+                             key=f"map_editor_selec_{versao}")
+        local = lista[indice].get('local') or {}
+        coords = [(p.get('local') or {}) for p in lista if (p.get('local') or {}).get('latitude') is not None]
+        referencia = coords[0] if coords else {'latitude': -27.1, 'longitude': -48.9}
+        m = folium.Map(location=[float(referencia['latitude']), float(referencia['longitude'])],zoom_start=13)
+        for i,p in enumerate(lista):
+            loc = p.get('local') or {}
+            if loc.get('latitude') is not None and loc.get('longitude') is not None:
+                folium.Marker([float(loc['latitude']),float(loc['longitude'])],
+                              tooltip=f"{i+1}. {str(loc.get('label') or '')[:80]}",
+                              icon=folium.Icon(color='red' if indice==i else 'blue')).add_to(m)
+        saida = st_folium(m, height=360, use_container_width=True, returned_objects=['last_clicked'],
+                           key=f"mapa_editor_{versao}")
+        if saida and saida.get('last_clicked'):
+            st.session_state[f'clique_mapa_{versao}'] = saida['last_clicked']
+        clique = st.session_state.get(f'clique_mapa_{versao}')
+        if clique:
+            st.caption(f"Nova posição: {clique['lat']:.6f}, {clique['lng']:.6f}")
+        if st.button('📍 Usar posição marcada neste ponto',disabled=not clique,
+                     key=f'confirmar_mapa_{versao}'):
+            try:
+                lat,lon=validar_coordenadas(clique['lat'],clique['lng'])
+                novo = dict(local)
+                novo.update({'latitude':lat,'longitude':lon,
+                             'label':str(local.get('label') or f'{lat:.6f}, {lon:.6f}')})
+                lista[indice]['local']=novo
+                st.session_state.rota_base_edicao_versao+=1
+                st.rerun()
+            except (TypeError,ValueError) as erro:
+                st.error(str(erro))
+
 
 
 # ============================================================
@@ -9119,6 +9670,7 @@ elif modo_entrada == "Usar rota salva":
             )
             lista = st.session_state.rota_base_edicao_pontos
             retorno_atual = bool(st.session_state.rota_base_edicao_voltar)
+            renderizar_ferramentas_editor_rota(lista, retorno_atual)
             foco = None
             valores = {}
 
@@ -9801,6 +10353,33 @@ else:
 
 
 # ============================================================
+# HORÁRIOS POR PARADA
+# ============================================================
+
+locais_para_horarios = [ponto_inicio] + [p for p in paradas if p]
+if not voltar_inicio and ponto_fim:
+    locais_para_horarios.append(ponto_fim)
+
+horarios_editados = None
+horario_saida = "08:00"
+if locais_para_horarios and all(locais_para_horarios):
+    with st.expander("🕒 Horários e janelas de atendimento (opcional)"):
+        st.caption("Informe HH:MM. O algoritmo só aceitará uma rota que respeite as janelas preenchidas.")
+        horario_saida = st.text_input("Saída prevista (HH:MM)", value="08:00",
+                                      key=f"saida_rota_{st.session_state.form_version}")
+        linhas_horarios = []
+        for i, loc in enumerate(locais_para_horarios, start=1):
+            linhas_horarios.append({
+                "Ponto": i, "Local": str(loc.get("label") or loc.get("nome") or f"Ponto {i}"),
+                "Início": str(loc.get("janela_inicio") or ""),
+                "Fim": str(loc.get("janela_fim") or ""),
+                "Atendimento (min)": int(loc.get("servico_min") or 0),
+            })
+        horarios_editados = st.data_editor(pd.DataFrame(linhas_horarios),
+            disabled=["Ponto", "Local"], hide_index=True, use_container_width=True,
+            key=f"horarios_tabela_{st.session_state.form_version}_{modo_entrada}")
+
+# ============================================================
 # CONFIGURAÇÃO DA OTIMIZAÇÃO
 # ============================================================
 
@@ -9846,6 +10425,17 @@ with c2:
             "no plano Pro."
         )
 
+
+# ============================================================
+# CONTROLE DA ORDEM
+# ============================================================
+
+preservar_ordem = st.checkbox(
+    "📌 Manter exatamente a ordem informada (sem reordenar pelo algoritmo)",
+    value=bool(st.session_state.ordem_manualmente_alterada) if modo_entrada == 'Usar rota salva' else False,
+    key=f"preservar_ordem_{st.session_state.form_version}_{modo_entrada}",
+    help="Útil após arrastar as paradas. O ORS calcula o percurso e os horários mantendo sua sequência.",
+)
 
 # ============================================================
 # CALCULAR
@@ -9954,6 +10544,16 @@ if calcular_agora or salvar_sobre_rota_base:
         )
 
     try:
+        minutos_hora(horario_saida)
+        if horarios_editados is not None and len(horarios_editados) == len(locais):
+            for i, linha in horarios_editados.reset_index(drop=True).iterrows():
+                ini = linha.get("Início")
+                fim = linha.get("Fim")
+                serv = linha.get("Atendimento (min)")
+                locais[i]["janela_inicio"] = "" if pd.isna(ini) else str(ini).strip()
+                locais[i]["janela_fim"] = "" if pd.isna(fim) else str(fim).strip()
+                locais[i]["servico_min"] = 0 if pd.isna(serv) else int(serv)
+        locais[0]["horario_partida"] = horario_saida
 
         with st.spinner(
             "Calculando a melhor rota..."
@@ -9965,6 +10565,7 @@ if calcular_agora or salvar_sobre_rota_base:
                     voltar_inicio,
                     objetivo,
                     modo,
+                    preservar_ordem=preservar_ordem,
                 )
             )
 
