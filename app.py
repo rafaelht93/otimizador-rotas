@@ -492,6 +492,15 @@ init_state("nova_parada_execucao", None)
 init_state("compartilhamento_link", None)
 init_state("ordem_manualmente_alterada", False)
 
+# Pontos criados diretamente no mapa em Nova rota.
+init_state("mapa_nova_pontos", [])
+init_state("mapa_nova_uid", 0)
+init_state("mapa_nova_ultimo_clique", None)
+init_state("mapa_nova_versao", 0)
+init_state("mapa_nova_centro", [-27.0977, -48.9174])  # Brusque/SC; mapa livre para navegar
+init_state("mapa_nova_zoom", 13)
+init_state("mapa_nova_retorno", False)
+
 
 # ============================================================
 # UTILIDADES
@@ -9625,6 +9634,264 @@ def renderizar_ferramentas_editor_rota(lista, retorno):
 
 
 # ============================================================
+# NOVA ROTA — CRIAÇÃO POR CLIQUES NO MAPA
+# ============================================================
+
+def novo_ponto_por_mapa(pontos, latitude, longitude, uid, limite=0):
+    """Valida uma seleção e devolve a lista nova sem alterar a anterior."""
+    lat, lon = validar_coordenadas(latitude, longitude)
+    if limite and len(pontos) >= limite:
+        raise ValueError(f"Seu plano permite no máximo {limite} locais por rota.")
+    if any(
+        round(float(p["latitude"]), 6) == round(lat, 6)
+        and round(float(p["longitude"]), 6) == round(lon, 6)
+        for p in pontos
+    ):
+        raise ValueError("Já existe um ponto nessa coordenada. Clique em outro lugar.")
+    novo = {
+        "uid": uid,
+        "latitude": lat,
+        "longitude": lon,
+        "label": f"{lat:.6f}, {lon:.6f}",
+    }
+    return [*pontos, novo]
+
+
+def mover_ponto_por_mapa(pontos, uid, latitude, longitude):
+    """Reposiciona apenas um pin, preservando o nome personalizado."""
+    lat, lon = validar_coordenadas(latitude, longitude)
+    indice = next((i for i, p in enumerate(pontos) if p["uid"] == uid), None)
+    if indice is None:
+        raise ValueError("Selecione um ponto válido para reposicionar.")
+    for i, outro in enumerate(pontos):
+        if i != indice and round(outro["latitude"], 6) == round(lat, 6) and round(outro["longitude"], 6) == round(lon, 6):
+            raise ValueError("Outro ponto já ocupa essa localização.")
+    novos = [dict(p) for p in pontos]
+    anterior = novos[indice]
+    etiqueta_automatica = f"{anterior['latitude']:.6f}, {anterior['longitude']:.6f}"
+    if anterior.get("label") == etiqueta_automatica:
+        anterior["label"] = f"{lat:.6f}, {lon:.6f}"
+    anterior["latitude"], anterior["longitude"] = lat, lon
+    return novos
+
+
+def repartir_pontos_mapa(pontos, retorno):
+    """Divide pontos em origem/paradas/destino, inclusive em rota circular."""
+    if not pontos:
+        return None, [], None
+    origem = pontos[0]
+    if retorno:
+        return origem, list(pontos[1:]), origem
+    if len(pontos) == 1:
+        return origem, [], None
+    return origem, list(pontos[1:-1]), pontos[-1]
+
+
+def mostrar_criacao_rota_por_mapa(limite):
+    """Adiciona ou reposiciona pins clicando no mapa Folium interativo."""
+    st.caption(
+        "Clique no mapa para acrescentar os locais da rota. O primeiro clique é a "
+        "origem; o último será o destino, a menos que você escolha retornar ao início. "
+        "Arraste o mapa e use o zoom para encontrar o endereço."
+    )
+    pontos = st.session_state.mapa_nova_pontos
+
+    col_acao, col_limpar = st.columns([4, 1], vertical_alignment="bottom")
+    with col_acao:
+        acao = st.radio(
+            "Ao clicar no mapa",
+            ["Adicionar ponto", "Reposicionar ponto"],
+            horizontal=True,
+            key="mapa_nova_acao",
+        )
+    with col_limpar:
+        if rotaki_botao(
+            "🗑️ Limpar",
+            key="mapa_nova_limpar",
+            disabled=not pontos,
+            use_container_width=True,
+        ):
+            st.session_state.mapa_nova_pontos = []
+            st.session_state.mapa_nova_ultimo_clique = None
+            st.session_state.mapa_nova_versao += 1
+            st.rerun()
+
+    uid_selecionado = None
+    if acao == "Reposicionar ponto":
+        if pontos:
+            uid_selecionado = st.selectbox(
+                "Ponto que será movido ao clicar",
+                options=[p["uid"] for p in pontos],
+                format_func=lambda uid: next(
+                    f"{i}. {p.get('label') or 'Ponto'}"
+                    for i, p in enumerate(pontos, 1) if p["uid"] == uid
+                ),
+                key="mapa_nova_escolha_uid",
+            )
+        else:
+            st.info("Adicione um ponto para poder reposicioná-lo.")
+
+    centro = st.session_state.mapa_nova_centro
+    m = folium.Map(
+        location=centro,
+        zoom_start=st.session_state.mapa_nova_zoom,
+        control_scale=True,
+    )
+    if len(pontos) > 1:
+        # Linha pontilhada apenas para visualizar a sequência escolhida.
+        # O traçado viário real é calculado pelo ORS após a otimização.
+        caminho_provisorio = [
+            [p["latitude"], p["longitude"]] for p in pontos
+        ]
+        if st.session_state.mapa_nova_retorno:
+            caminho_provisorio.append(caminho_provisorio[0])
+        folium.PolyLine(
+            caminho_provisorio, color="#087de0", weight=3,
+            opacity=0.75, dash_array="6 8",
+            tooltip="Sequência provisória — não representa as ruas",
+        ).add_to(m)
+    for numero, p in enumerate(pontos, 1):
+        if numero == 1:
+            cor = "#04cfae"
+        elif numero == len(pontos) and not st.session_state.mapa_nova_retorno:
+            cor = "#ed5656"
+        else:
+            cor = "#146bed"
+        icone_html = (
+            '<div style="display:flex;align-items:center;justify-content:center;'
+            'width:34px;height:34px;border-radius:50% 50% 50% 0;'
+            'transform:rotate(-45deg);border:2px solid white;'
+            'box-shadow:0 2px 7px #061d4a88;background:' + cor + ';">'
+            '<span style="transform:rotate(45deg);color:white;'
+            'font-weight:800;font-size:14px;">' + str(numero) + '</span></div>'
+        )
+        folium.Marker(
+            location=[p["latitude"], p["longitude"]],
+            tooltip=f"{numero}. {html.escape(str(p.get('label') or 'Ponto'))}",
+            icon=folium.DivIcon(
+                html=icone_html,
+                icon_size=(34, 34),
+                icon_anchor=(17, 34),
+                class_name="rotaki-pin",
+            ),
+        ).add_to(m)
+
+    st.caption("Verde = origem · Azul = paradas · Vermelho = destino. Cada clique adiciona ou move o pin selecionado.")
+    resposta = st_folium(
+        m,
+        height=470,
+        use_container_width=True,
+        returned_objects=["last_clicked"],
+        key=f"mapa_nova_interativo_{st.session_state.form_version}_{st.session_state.mapa_nova_versao}",
+    ) or {}
+    centro_resposta = resposta.get("center")
+    if isinstance(centro_resposta, dict):
+        try:
+            lat_centro, lon_centro = validar_coordenadas(
+                centro_resposta["lat"], centro_resposta["lng"]
+            )
+            st.session_state.mapa_nova_centro = [lat_centro, lon_centro]
+        except (ValueError, KeyError, TypeError):
+            pass
+    zoom_resposta = resposta.get("zoom")
+    if isinstance(zoom_resposta, (int, float)) and 1 <= zoom_resposta <= 20:
+        st.session_state.mapa_nova_zoom = int(zoom_resposta)
+
+    clique = resposta.get("last_clicked")
+    if isinstance(clique, dict) and "lat" in clique and "lng" in clique:
+        try:
+            lat, lon = validar_coordenadas(clique["lat"], clique["lng"])
+            assinatura = (round(lat, 8), round(lon, 8))
+            # st_folium repete o último clique nos reruns: nunca replicar um pin
+            # ao editar nome, remover ou alterar outras configurações.
+            if assinatura != st.session_state.mapa_nova_ultimo_clique:
+                st.session_state.mapa_nova_ultimo_clique = assinatura
+                if acao == "Adicionar ponto":
+                    uid = st.session_state.mapa_nova_uid + 1
+                    st.session_state.mapa_nova_pontos = novo_ponto_por_mapa(
+                        pontos, lat, lon, uid, limite
+                    )
+                    st.session_state.mapa_nova_uid = uid
+                elif uid_selecionado is not None:
+                    st.session_state.mapa_nova_pontos = mover_ponto_por_mapa(
+                        pontos, uid_selecionado, lat, lon
+                    )
+                    atualizado = next(
+                        p for p in st.session_state.mapa_nova_pontos
+                        if p["uid"] == uid_selecionado
+                    )
+                    # Sincroniza também o campo de texto já existente.
+                    st.session_state[
+                        f"mapa_nova_rotulo_{st.session_state.mapa_nova_versao}_{uid_selecionado}"
+                    ] = atualizado["label"]
+                st.rerun()
+        except (TypeError, ValueError) as erro:
+            st.warning(str(erro))
+
+    if not pontos:
+        st.info("Clique no mapa para marcar o ponto inicial. Depois, adicione os próximos locais.")
+    else:
+        st.markdown(f"**Pontos escolhidos ({len(pontos)})**")
+        for i, p in enumerate(pontos):
+            tipo = (
+                "Ponto inicial" if i == 0 else
+                "Parada" if st.session_state.mapa_nova_retorno or i < len(pontos) - 1 else
+                "Ponto final"
+            )
+            col_nome, col_cima, col_baixo, col_excluir = st.columns(
+                [8, 1, 1, 1], vertical_alignment="bottom"
+            )
+            with col_nome:
+                rotulo = st.text_input(
+                    f"{i + 1}. {tipo}",
+                    value=p.get("label") or "",
+                    key=f"mapa_nova_rotulo_{st.session_state.mapa_nova_versao}_{p['uid']}",
+                )
+                p["label"] = rotulo.strip() or f"{p['latitude']:.6f}, {p['longitude']:.6f}"
+                st.caption(f"{p['latitude']:.6f}, {p['longitude']:.6f}")
+            with col_cima:
+                if st.button(
+                    "↑",
+                    key=f"mapa_nova_subir_{p['uid']}",
+                    disabled=i == 0,
+                    help="Mover ponto para cima",
+                ):
+                    pontos[i - 1], pontos[i] = pontos[i], pontos[i - 1]
+                    st.rerun()
+            with col_baixo:
+                if st.button(
+                    "↓",
+                    key=f"mapa_nova_descer_{p['uid']}",
+                    disabled=i == len(pontos) - 1,
+                    help="Mover ponto para baixo",
+                ):
+                    pontos[i + 1], pontos[i] = pontos[i], pontos[i + 1]
+                    st.rerun()
+            with col_excluir:
+                if rotaki_botao(
+                    "🗑️",
+                    key=f"mapa_nova_excluir_{p['uid']}",
+                    help="Excluir ponto",
+                ):
+                    st.session_state.mapa_nova_pontos = [
+                        atual for atual in pontos if atual["uid"] != p["uid"]
+                    ]
+                    st.rerun()
+
+    voltar = st.checkbox(
+        "🔄 Retornar ao ponto inicial",
+        key="mapa_nova_retorno",
+    )
+    if voltar and len(pontos) >= 2:
+        st.caption("O último pin passa a ser uma parada, e o trajeto termina no primeiro pin.")
+    if limite and len(pontos) >= limite:
+        st.caption(f"Limite de {limite} locais atingido.")
+    if len(pontos) == 1:
+        st.warning("Marque pelo menos mais um ponto no mapa para calcular a rota.")
+    return repartir_pontos_mapa(pontos, voltar), len(pontos)
+
+
+# ============================================================
 # PÁGINAS
 # ============================================================
 
@@ -9747,6 +10014,7 @@ modo_entrada = st.radio(
         "Importar CSV/Excel",
         "Selecionar locais salvos",
         "Usar rota salva",
+        "Criar pelo mapa",
     ],
     index=(
         2
@@ -9763,11 +10031,12 @@ modo_entrada = st.radio(
     ),
 )
 
-st.caption(
-    "Digite o endereço **ou as coordenadas diretamente no mesmo campo**, "
-    "no formato `-27.0985, -48.9123` (latitude, longitude). "
-    'No CSV, coloque coordenadas entre aspas: `"-27.0985, -48.9123"`.'
-)
+if modo_entrada != "Criar pelo mapa":
+    st.caption(
+        "Digite o endereço **ou as coordenadas diretamente no mesmo campo**, "
+        "no formato `-27.0985, -48.9123` (latitude, longitude). "
+        'No CSV, coloque coordenadas entre aspas: `"-27.0985, -48.9123"`.'
+    )
 
 ponto_inicio = None
 ponto_fim = None
@@ -9824,6 +10093,15 @@ if modo_entrada == "Digitar manualmente":
     )
     if voltar_inicio:
         ponto_fim = ponto_inicio
+
+
+# ============================================================
+# CRIAÇÃO POR CLIQUES NO MAPA
+# ============================================================
+
+elif modo_entrada == "Criar pelo mapa":
+    (ponto_inicio, paradas, ponto_fim), _ = mostrar_criacao_rota_por_mapa(limite_locais)
+    voltar_inicio = st.session_state.mapa_nova_retorno
 
 
 # ============================================================
