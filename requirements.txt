@@ -8,3 +8,4 @@ ortools
 streamlit-searchbox
 pandas
 openpyxl
+streamlit-sortables==0.3.1
