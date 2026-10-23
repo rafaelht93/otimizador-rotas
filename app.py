@@ -9390,37 +9390,129 @@ def renderizar_ferramentas_editor_rota(lista, retorno):
 
         st.markdown("**Corrigir coordenadas clicando no mapa**")
         opcoes = list(range(len(lista)))
-        indice = st.selectbox("Escolha o ponto que deseja corrigir",opcoes,
-                             format_func=lambda i: f"{i+1}. {(lista[i].get('local') or {}).get('label') or 'Novo ponto'}",
-                             key=f"map_editor_selec_{versao}")
-        local = lista[indice].get('local') or {}
-        coords = [(p.get('local') or {}) for p in lista if (p.get('local') or {}).get('latitude') is not None]
-        referencia = coords[0] if coords else {'latitude': -27.1, 'longitude': -48.9}
-        m = folium.Map(location=[float(referencia['latitude']), float(referencia['longitude'])],zoom_start=13)
-        for i,p in enumerate(lista):
-            loc = p.get('local') or {}
-            if loc.get('latitude') is not None and loc.get('longitude') is not None:
-                folium.Marker([float(loc['latitude']),float(loc['longitude'])],
-                              tooltip=f"{i+1}. {str(loc.get('label') or '')[:80]}",
-                              icon=folium.Icon(color='red' if indice==i else 'blue')).add_to(m)
-        saida = st_folium(m, height=360, use_container_width=True, returned_objects=['last_clicked'],
-                           key=f"mapa_editor_{versao}")
-        if saida and saida.get('last_clicked'):
-            st.session_state[f'clique_mapa_{versao}'] = saida['last_clicked']
-        clique = st.session_state.get(f'clique_mapa_{versao}')
+        indice = st.selectbox(
+            "Escolha o ponto que deseja corrigir",
+            opcoes,
+            format_func=lambda i: (
+                f"{i+1}. {(lista[i].get('local') or {}).get('label') or 'Novo ponto'}"
+            ),
+            key=f"map_editor_selec_{versao}",
+        )
+        ponto_selecionado = lista[indice]
+        local = ponto_selecionado.get("local") or {}
+        uid_ponto = str(ponto_selecionado["uid"])
+        # O candidato é individual por ponto. Selecionar outro local não
+        # reutiliza acidentalmente o clique anterior.
+        chave_clique = f"clique_mapa_{versao}_{uid_ponto}"
+        clique = st.session_state.get(chave_clique)
         if clique:
-            st.caption(f"Nova posição: {clique['lat']:.6f}, {clique['lng']:.6f}")
-        if st.button('📍 Usar posição marcada neste ponto',disabled=not clique,
-                     key=f'confirmar_mapa_{versao}'):
             try:
-                lat,lon=validar_coordenadas(clique['lat'],clique['lng'])
+                lat_candidato, lon_candidato = validar_coordenadas(
+                    clique["lat"], clique["lng"]
+                )
+            except (TypeError, ValueError, KeyError):
+                st.session_state.pop(chave_clique, None)
+                clique = None
+
+        coordenadas_existentes = [
+            p.get("local") or {}
+            for p in lista
+            if (p.get("local") or {}).get("latitude") is not None
+            and (p.get("local") or {}).get("longitude") is not None
+        ]
+        # Começar o mapa próximo do ponto escolhido, e não obrigatoriamente
+        # perto da primeira parada da rota.
+        referencia = (
+            local
+            if local.get("latitude") is not None
+            and local.get("longitude") is not None
+            else coordenadas_existentes[0]
+            if coordenadas_existentes
+            else {"latitude": -27.1, "longitude": -48.9}
+        )
+        m = folium.Map(
+            location=[float(referencia["latitude"]), float(referencia["longitude"])],
+            zoom_start=15,
+        )
+        for i, p in enumerate(lista):
+            loc = p.get("local") or {}
+            if loc.get("latitude") is not None and loc.get("longitude") is not None:
+                folium.Marker(
+                    [float(loc["latitude"]), float(loc["longitude"])],
+                    tooltip=f"{i+1}. {str(loc.get('label') or '')[:80]}",
+                    icon=folium.Icon(color="red" if indice == i else "blue"),
+                ).add_to(m)
+
+        # Exibir o PIN VERDE no mesmo mapa, antes da confirmação, para que
+        # o usuário confira visualmente a localização clicada.
+        if clique:
+            folium.Marker(
+                [lat_candidato, lon_candidato],
+                tooltip="📍 Nova posição selecionada — ainda não salva",
+                popup="Nova posição selecionada (aguardando confirmação)",
+                icon=folium.Icon(color="green", icon="ok-sign"),
+                z_index_offset=1000,
+            ).add_to(m)
+
+        st.caption(
+            "🔴 Ponto atual • 🔵 Outros locais • 🟢 Nova posição clicada. "
+            "Clique no mapa para posicionar ou mover o pin verde."
+        )
+        saida = st_folium(
+            m,
+            height=360,
+            use_container_width=True,
+            returned_objects=["last_clicked"],
+            key=f"mapa_editor_{versao}_{uid_ponto}",
+        )
+        novo_clique = (saida or {}).get("last_clicked")
+        if novo_clique:
+            try:
+                nova_lat, nova_lon = validar_coordenadas(
+                    novo_clique["lat"], novo_clique["lng"]
+                )
+            except (KeyError, TypeError, ValueError):
+                st.warning("O mapa retornou coordenadas inválidas. Clique novamente.")
+            else:
+                # O componente pode devolver o último clique em reruns;
+                # atualizar somente quando a posição realmente mudar evita
+                # um ciclo infinito de rerun e mantém o pin visível.
+                if (
+                    not clique
+                    or not math.isclose(nova_lat, lat_candidato, abs_tol=1e-8)
+                    or not math.isclose(nova_lon, lon_candidato, abs_tol=1e-8)
+                ):
+                    st.session_state[chave_clique] = {
+                        "lat": nova_lat,
+                        "lng": nova_lon,
+                    }
+                    st.rerun()
+
+        if clique:
+            st.success(
+                f"📍 Pin verde em: {lat_candidato:.6f}, {lon_candidato:.6f}. "
+                "Confira no mapa e confirme abaixo para salvar."
+            )
+        if st.button(
+            "✅ Confirmar posição do pin verde",
+            disabled=not clique,
+            key=f"confirmar_mapa_{versao}_{uid_ponto}",
+        ):
+            try:
+                lat, lon = validar_coordenadas(clique["lat"], clique["lng"])
                 novo = dict(local)
-                novo.update({'latitude':lat,'longitude':lon,
-                             'label':str(local.get('label') or f'{lat:.6f}, {lon:.6f}')})
-                lista[indice]['local']=novo
-                st.session_state.rota_base_edicao_versao+=1
+                novo.update(
+                    {
+                        "latitude": lat,
+                        "longitude": lon,
+                        "label": str(local.get("label") or f"{lat:.6f}, {lon:.6f}"),
+                    }
+                )
+                ponto_selecionado["local"] = novo
+                st.session_state.pop(chave_clique, None)
+                st.session_state.rota_base_edicao_versao += 1
                 st.rerun()
-            except (TypeError,ValueError) as erro:
+            except (KeyError, TypeError, ValueError) as erro:
                 st.error(str(erro))
 
 
