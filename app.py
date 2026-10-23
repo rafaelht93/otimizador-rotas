@@ -334,21 +334,9 @@ if st.query_params.get("rota_compartilhada"):
 # ============================================================
 
 if not st.user.is_logged_in:
-
-    rotaki_titulo("Rotaki — Otimizador de Rotas", "nova")
-
-    st.write(
-        "Entre com sua conta Google para acessar "
-        "o Otimizador de Rotas."
-    )
-
-    rotaki_botao(
-        "🔐 Entrar com Google",
-        on_click=st.login,
-        type="primary",
-        use_container_width=True,
-    )
-
+    # Página pública antes da autenticação. Login continua sendo Google OAuth.
+    from landing import render_landing
+    render_landing()
     st.stop()
 
 
